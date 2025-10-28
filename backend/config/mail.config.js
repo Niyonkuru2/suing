@@ -1,28 +1,21 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-export const mailTransporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+export const resend = new Resend(process.env.RESEND_API_KEY);
 
-//  HTML emails
 export const sendAlertEmail = async (subject, htmlContent) => {
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: process.env.ALERT_RECEIVER,
-    subject,
-    html: htmlContent,
-  };
-
   try {
-    await mailTransporter.sendMail(mailOptions);
-    console.log("Email alert sent successfully");
+    const { data, error } = await resend.emails.send({
+      from: "Forex Analyzer <onboarding@resend.dev>",
+      to: process.env.ALERT_RECEIVER,
+      subject,
+      html: htmlContent,
+    });
+
+    if (error) throw error;
+    console.log("Email alert sent successfully:", data?.id || "no-id");
   } catch (err) {
     console.error("Failed to send email:", err.message);
   }
