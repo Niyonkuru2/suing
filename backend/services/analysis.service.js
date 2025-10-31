@@ -55,10 +55,10 @@ export const autoAnalyzeMarket = async () => {
     { symbol: "EUR/USD", timeframe: "5min" },
     { symbol: "GBP/USD", timeframe: "5min" },
     { symbol: "USD/JPY", timeframe: "5min" },
-    { symbol: "USD/CAD", timeframe: "5min" },
-    { symbol: "USD/CHF", timeframe: "5min" },
-    { symbol: "NZD/USD", timeframe: "5min" },
-    { symbol: "GBP/JPY", timeframe: "5min" },
+    //{ symbol: "USD/CAD", timeframe: "5min" },
+    //{ symbol: "USD/CHF", timeframe: "5min" },
+    //{ symbol: "NZD/USD", timeframe: "5min" },
+    //{ symbol: "GBP/JPY", timeframe: "5min" },
     { symbol: "EUR/GBP", timeframe: "5min" },
 
   ];
