@@ -35,7 +35,8 @@ export const performAnalysis = async (symbol, timeframe) => {
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
   //const url = "https://forex-analyser.onrender.com/analyze";
-  const url = "https://pullback-d2nv.onrender.com/analyze";
+  //const url = "https://pullback-d2nv.onrender.com/analyze";
+   const url = "https://forex-analyser.onrender.com/analyze";
   const payload = { values: marketData, symbol, timeframe };
 
   try {
