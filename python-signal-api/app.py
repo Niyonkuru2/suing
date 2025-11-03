@@ -39,3 +39,7 @@ def analyze(data: MarketData):
     }
 
     return result
+    
+@app.get("/")
+def home():
+    return {"message": "Market Signal API is running!"}
