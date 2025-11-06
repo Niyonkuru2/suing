@@ -39,7 +39,6 @@ export const performAnalysis = async (symbol, timeframe) => {
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
   const url = "https://suing.onrender.com/analyze";
-  //const url = "https://pullback-d2nv.onrender.com/analyze";
   const payload = { values: marketData, symbol, timeframe };
 
   try {
@@ -60,7 +59,6 @@ export const autoAnalyzeMarket = async () => {
     { symbol: "USD/JPY", timeframe: "5min" },
     { symbol: "USD/CHF", timeframe: "5min" },
     { symbol: "NZD/USD", timeframe: "5min" },
-    { symbol: "EUR/GBP", timeframe: "5min" },
 
   ];
 
