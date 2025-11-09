@@ -38,7 +38,7 @@ export const performAnalysis = async (symbol, timeframe) => {
 
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
-  const url = "https://suing.onrender.com/analyze";
+  const url = "https://suing-kw28.onrender.com/analyze";
   const payload = { values: marketData, symbol, timeframe };
 
   try {
