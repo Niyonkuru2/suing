@@ -54,14 +54,10 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
 // Auto-analysis scheduler
 export const autoAnalyzeMarket = async () => {
   const pairs = [
-    { symbol: "EUR/USD", timeframe: "5min" },
-    { symbol: "GBP/USD", timeframe: "5min" },
-    { symbol: "USD/JPY", timeframe: "5min" },
-    { symbol: "USD/CHF", timeframe: "5min" },
     { symbol: "NZD/USD", timeframe: "5min" },
-    //{ symbol: "EUR/GBP", timeframe: "5min"},
-    //{ symbol: "USD/CAD", timeframe: "5min"},
-
+    { symbol: "EUR/GBP", timeframe: "5min"},
+    { symbol: "USD/CAD", timeframe: "5min"},
+    { symbol: "GBP/JPY", timeframe: "5min"},
   ];
 
   for (const pair of pairs) {
