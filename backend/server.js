@@ -10,7 +10,7 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-// Run automatic analysis every 10 minutes
+// Run automatic analysis every 5 minutes
 cron.schedule("*/10 * * * *", async () => {
   console.log("Running scheduled market analysis...");
   await autoAnalyzeMarket();
