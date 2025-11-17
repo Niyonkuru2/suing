@@ -13,17 +13,17 @@ export const performAnalysis = async (symbol, timeframe) => {
     const marketData = response.data.values;
     const result = await runPythonAnalysis(marketData, symbol, timeframe);
 
-    // If signal is BUY or SELL send professional HTML email
-    if (["BUY", "SELL"].includes(result.signal)) {
+    // If signal is BUY or SELL, send professional HTML email with all details
+    if (["BUY", "SELL"].includes(result.crossover)) {
       const emailHTML = marketSignalEmailTemplate(
         result.symbol,
-        result.signal,
+        result.crossover,
+        result.direction,
         result.timeframe,
         result.last_close,
-        result.timestamp
       );
 
-      await sendAlertEmail(`${result.symbol} Signal Alert`, emailHTML);
+      await sendAlertEmail(`${result.symbol} ${result.crossover} Signal Alert`, emailHTML);
     }
 
     return result;
@@ -35,7 +35,7 @@ export const performAnalysis = async (symbol, timeframe) => {
 
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
-  const url = "https://scalping-qckk.onrender.com/analyze";
+  const url = "https://five0ema-1-7wri.onrender.com/analyze";
   const payload = { values: marketData, symbol, timeframe };
 
   try {
@@ -51,10 +51,14 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
 // Auto-analysis scheduler
 export const autoAnalyzeMarket = async () => {
   const pairs = [
-    { symbol: "NZD/USD", timeframe: "5min" },
-    { symbol: "EUR/GBP", timeframe: "5min"},
-    { symbol: "USD/CAD", timeframe: "5min"},
-    { symbol: "GBP/JPY", timeframe: "5min"},
+    { symbol: "EUR/USD", timeframe: "5min" },
+    { symbol: "GBP/USD", timeframe: "5min" },
+    { symbol: "USD/JPY", timeframe: "5min" },
+    //{ symbol: "USD/CAD", timeframe: "5min" },
+    //{ symbol: "USD/CHF", timeframe: "5min" },
+    //{ symbol: "NZD/USD", timeframe: "5min" },
+    //{ symbol: "GBP/JPY", timeframe: "5min" },
+    //{ symbol: "EUR/GBP", timeframe: "5min" },
   ];
 
   for (const pair of pairs) {
