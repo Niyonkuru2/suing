@@ -8,7 +8,7 @@ export const resend = new Resend(process.env.RESEND_API_KEY);
 export const sendAlertEmail = async (subject, htmlContent) => {
   try {
     const { data, error } = await resend.emails.send({
-      from: "Top Down Analysis <onboarding@resend.dev>",
+      from: "Forex Analysis With 50 EMA <onboarding@resend.dev>",
       to: process.env.ALERT_RECEIVER,
       subject,
       html: htmlContent,
