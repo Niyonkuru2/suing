@@ -2,28 +2,45 @@ import axios from "axios";
 import { sendAlertEmail } from "../config/mail.config.js";
 import { marketSignalEmailTemplate } from "../utils/sendAlertEmail.js";
 
+// Perform analysis for a given symbol and timeframe
 export const performAnalysis = async (symbol, timeframe) => {
   try {
     const apiKey = process.env.TWELVE_DATA_API_KEY;
     const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${timeframe}&outputsize=200&apikey=${apiKey}`;
     
+    // Fetch market data
     const response = await axios.get(url);
     if (response.data.status === "error") throw new Error(response.data.message);
 
     const marketData = response.data.values;
+
+    // Run Python analysis via FastAPI
     const result = await runPythonAnalysis(marketData, symbol, timeframe);
 
-    // If signal is BUY or SELL, send professional HTML email with all details
-    if (["BUY", "SELL"].includes(result.crossover)) {
+    // Only send email if full signal exists
+    if (["BUY", "SELL"].includes(result.signal)) {
       const emailHTML = marketSignalEmailTemplate(
         result.symbol,
-        result.crossover,
-        result.direction,
+        result.signal,
+        result.structure,
         result.timeframe,
-        result.last_close,
+        result.entry,
+        result.stop_loss,
+        result.take_profit
       );
 
-      await sendAlertEmail(`${result.symbol} ${result.crossover} Signal Alert`, emailHTML);
+      await sendAlertEmail(
+        `${result.symbol} ${result.signal} Signal Alert`,
+        emailHTML
+      );
+
+      console.log(
+        `Signal sent: ${result.symbol} ${result.signal} (${result.structure})`
+      );
+    } else {
+      console.log(
+        `No valid signal for ${symbol} (${timeframe}). Structure: ${result.structure}`
+      );
     }
 
     return result;
@@ -47,18 +64,18 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
   }
 };
 
-
 // Auto-analysis scheduler
 export const autoAnalyzeMarket = async () => {
+  // Use higher timeframe like H1 for better pullback signals
   const pairs = [
-    { symbol: "EUR/USD", timeframe: "5min" },
-    { symbol: "GBP/USD", timeframe: "5min" },
-    { symbol: "USD/JPY", timeframe: "5min" },
-    //{ symbol: "USD/CAD", timeframe: "5min" },
-    //{ symbol: "USD/CHF", timeframe: "5min" },
-    //{ symbol: "NZD/USD", timeframe: "5min" },
-    //{ symbol: "GBP/JPY", timeframe: "5min" },
-    //{ symbol: "EUR/GBP", timeframe: "5min" },
+    { symbol: "EUR/USD", timeframe: "1h" },
+    { symbol: "GBP/USD", timeframe: "1h" },
+    { symbol: "USD/JPY", timeframe: "1h" },
+     { symbol: "USD/CAD", timeframe: "1h" },
+    { symbol: "USD/CHF", timeframe: "1h" },
+    { symbol: "NZD/USD", timeframe: "1h" },
+    { symbol: "GBP/JPY", timeframe: "1h" },
+    { symbol: "EUR/GBP", timeframe: "1h" },
   ];
 
   for (const pair of pairs) {
