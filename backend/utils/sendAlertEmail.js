@@ -1,17 +1,18 @@
 export const marketSignalEmailTemplate = (
   symbol,
   signal,
-  direction,
+  structure,
   timeframe,
-  lastClose,
-  timestamp
+  entry,
+  stopLoss,
+  takeProfit
 ) => `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Market Signal Alert</title>
+  <title>Pullback Strategy Signal</title>
   <style>
     body {
       margin: 0;
@@ -45,9 +46,8 @@ export const marketSignalEmailTemplate = (
     .highlight {
       background-color: #f3f4f6;
       border-radius: 8px;
-      padding: 15px 20px;
-      margin-top: 15px;
-      font-size: 15px;
+      padding: 20px;
+      margin-top: 20px;
     }
     .signal-tag {
       display: inline-block;
@@ -58,20 +58,6 @@ export const marketSignalEmailTemplate = (
       background-color: ${signal === "BUY" ? "#28a745" : "#dc3545"};
       text-transform: uppercase;
     }
-    .table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 20px;
-    }
-    .table th, .table td {
-      text-align: left;
-      padding: 8px 0;
-    }
-    .table th {
-      color: #6b7280;
-      font-weight: 600;
-      width: 40%;
-    }
     .footer {
       text-align: center;
       font-size: 13px;
@@ -80,33 +66,61 @@ export const marketSignalEmailTemplate = (
       background-color: #f9fafb;
       border-top: 1px solid #e5e7eb;
     }
+    .risk-box {
+      margin-top: 20px;
+      padding: 15px;
+      border-left: 4px solid #111827;
+      background: #fafafa;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="header">${signal} SIGNAL ALERT</div>
+    <div class="header">
+      ${signal} SIGNAL – Pullback Trend Strategy
+    </div>
+
     <div class="content">
-      <p>Dear Trader,</p>
+      <p>Hello Trader,</p>
+
       <p>
-        A new <strong>${signal}</strong> signal has been detected by your automated EMA-50 system.
-        Here are the details:
+        A new <strong>${signal}</strong> setup has been detected based on your 
+        <strong>Market Structure + EMA50 Pullback Strategy</strong>.
       </p>
-      
+
       <div class="highlight">
         <p><strong>Symbol:</strong> ${symbol}</p>
         <p><strong>Timeframe:</strong> ${timeframe}</p>
-        <p><strong>Trend Direction:</strong> ${direction}</p>
+        <p><strong>Market Structure:</strong> ${structure}</p>
         <p><strong>Signal:</strong> <span class="signal-tag">${signal}</span></p>
-        <p><strong>Last Close Price:</strong> ${lastClose}</p>
+        <p><strong>Entry Price:</strong> ${entry}</p>
+        <p><strong>Stop Loss:</strong> ${stopLoss}</p>
+        <p><strong>Take Profit:</strong> ${takeProfit}</p>
+        <p><strong>Risk : Reward:</strong> 1 : 2</p>
       </div>
-      <p>
-        Always confirm the signal with your trading strategy and risk management rules before entering a trade.
+
+      <div class="risk-box">
+        ⚠️ Trade only if all conditions align with your personal risk management rules.
+        Risk no more than 1–2% per trade. Discipline over emotion.
+      </div>
+
+      <p style="margin-top:20px;">
+        This signal was generated after:
+        <br/>
+        ✓ Confirmed market structure (HH/HL or LL/LH)
+        <br/>
+        ✓ EMA50 trend alignment
+        <br/>
+        ✓ Valid pullback
+        <br/>
+        ✓ Candle close confirmation
       </p>
     </div>
 
     <div class="footer">
-      &copy; ${new Date().getFullYear()} Market Signal Bot. All rights reserved.<br/>
-      Powered by FastAPI × Node.js × Twelve Data.
+      &copy; ${new Date().getFullYear()} Pullback Structure Bot<br/>
+      Powered by FastAPI × Node.js × Twelve Data
     </div>
   </div>
 </body>
