@@ -76,6 +76,7 @@ export const autoAnalyzeMarket = async () => {
     //{ symbol: "NZD/USD", timeframe: "5min" },
     { symbol: "EUR/GBP", timeframe: "5min" },
     { symbol: "AUD/USD", timeframe: "5min" },
+    { symbol: "XAU/USD", timeframe: "5min" }
   ];
 
   for (const pair of pairs) {
