@@ -1,95 +1,154 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
-from ta.trend import SMAIndicator
-from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+from ta.volatility import AverageTrueRange
 
-app = FastAPI(title="Market Signal API v2")
+app = FastAPI(title="EMA50 Pullback Pro Strategy API")
 
-# --- Data Models ---
-class PricePoint(BaseModel):
-    close: float
-    datetime: str | None = None
 
 class MarketData(BaseModel):
-    values: list[PricePoint]
+    values: list  # must include open, high, low, close
     symbol: str
     timeframe: str
 
 
+# ---------------- STRUCTURE DETECTION ----------------
+def detect_structure(df):
+    highs = []
+    lows = []
+
+    for i in range(2, len(df) - 2):
+        if df['high'][i] > df['high'][i-1] and df['high'][i] > df['high'][i-2] \
+           and df['high'][i] > df['high'][i+1] and df['high'][i] > df['high'][i+2]:
+            highs.append(df['high'][i])
+
+        if df['low'][i] < df['low'][i-1] and df['low'][i] < df['low'][i-2] \
+           and df['low'][i] < df['low'][i+1] and df['low'][i] < df['low'][i+2]:
+            lows.append(df['low'][i])
+
+    if len(highs) < 2 or len(lows) < 2:
+        return "NO_STRUCTURE"
+
+    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+        return "UPTREND"
+
+    elif highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+        return "DOWNTREND"
+
+    return "RANGE"
+
+
+# ---------------- CONFIRMATION ----------------
+def bullish_engulfing(prev, curr):
+    return (
+        curr['close'] > curr['open'] and
+        prev['close'] < prev['open'] and
+        curr['close'] > prev['open'] and
+        curr['open'] < prev['close']
+    )
+
+
+def bearish_engulfing(prev, curr):
+    return (
+        curr['close'] < curr['open'] and
+        prev['close'] > prev['open'] and
+        curr['open'] > prev['close'] and
+        curr['close'] < prev['open']
+    )
+
+
+# ---------------- SIDEWAYS FILTER ----------------
+def is_trending(df):
+    ema_slope = df['ema50'].iloc[-1] - df['ema50'].iloc[-6]
+    return abs(ema_slope) > df['atr'].iloc[-1] * 0.2
+
+
+# ---------------- MAIN ENDPOINT ----------------
 @app.post("/analyze")
 def analyze(data: MarketData):
-    # --- Convert incoming data ---
-    df = pd.DataFrame([v.dict() for v in data.values])
-    if "datetime" in df.columns:
-        df = df.sort_values(by="datetime", ascending=True).reset_index(drop=True)
-    df["close"] = df["close"].astype(float)
+    df = pd.DataFrame(data.values)
 
-    # --- Data check ---
-    if len(df) < 50:
-        return {"error": "Not enough data to calculate indicators (need at least 50 points)"}
+    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+        return {"error": "Missing OHLC data"}
 
-    # --- Indicators ---
-    df["sma20"] = SMAIndicator(df["close"], window=20).sma_indicator()
-    df["sma50"] = SMAIndicator(df["close"], window=50).sma_indicator()
-    df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
+    if len(df) < 100:
+        return {"error": "Not enough data"}
+
+    df = df.iloc[::-1].reset_index(drop=True)
+
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
+
+    # Indicators
+    df['ema50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+    atr_indicator = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
+    df['atr'] = atr_indicator.average_true_range()
+
+    structure = detect_structure(df)
 
     latest = df.iloc[-1]
-    previous = df.iloc[-2]
+    prev = df.iloc[-2]
 
-    # --- SMA crossover logic ---
-    signal = "NEUTRAL"
-    confidence = 0.0
+    signal = "NO_TRADE"
+    stop_loss = None
+    take_profit = None
 
-    if previous["sma20"] <= previous["sma50"] and latest["sma20"] > latest["sma50"]:
-        signal = "BUY"
-    elif previous["sma20"] >= previous["sma50"] and latest["sma20"] < latest["sma50"]:
-        signal = "SELL"
+    # 🔥 Sideways filter
+    if not is_trending(df):
+        return {
+            "symbol": data.symbol,
+            "timeframe": data.timeframe,
+            "structure": "SIDEWAYS",
+            "signal": "NO_TRADE"
+        }
 
-    # --- RSI confirmation ---
-    rsi_value = latest["rsi"]
-    if signal == "BUY":
-        if rsi_value > 55:
-            confidence = 0.9
-        elif rsi_value > 50:
-            confidence = 0.6
-        else:
-            signal, confidence = "NEUTRAL", 0.0
-    elif signal == "SELL":
-        if rsi_value < 45:
-            confidence = 0.9
-        elif rsi_value < 50:
-            confidence = 0.6
-        else:
-            signal, confidence = "NEUTRAL", 0.0
+    tolerance = df['atr'].iloc[-1] * 0.5
 
-    # --- Risk management levels ---
-    close_price = latest["close"]
-    if signal == "BUY":
-        stop_loss = close_price * 0.99
-        take_profit = close_price * 1.02
-    elif signal == "SELL":
-        stop_loss = close_price * 1.01
-        take_profit = close_price * 0.98
-    else:
-        stop_loss = take_profit = None
+    # ================= BUY =================
+    if structure == "UPTREND":
 
-    # --- Return structured response ---
-    result = {
+        # price must be above EMA
+        if latest['close'] > latest['ema50']:
+
+            # pullback must touch EMA zone
+            if abs(prev['close'] - prev['ema50']) <= tolerance:
+
+                # strong bullish confirmation
+                if bullish_engulfing(prev, latest):
+
+                    signal = "BUY"
+                    stop_loss = df['low'].iloc[-10:-1].min()
+
+                    risk = latest['close'] - stop_loss
+                    take_profit = latest['close'] + (risk * 2)
+
+    # ================= SELL =================
+    if structure == "DOWNTREND":
+
+        if latest['close'] < latest['ema50']:
+
+            if abs(prev['close'] - prev['ema50']) <= tolerance:
+
+                if bearish_engulfing(prev, latest):
+
+                    signal = "SELL"
+                    stop_loss = df['high'].iloc[-10:-1].max()
+
+                    risk = stop_loss - latest['close']
+                    take_profit = latest['close'] - (risk * 2)
+
+    return {
         "symbol": data.symbol,
         "timeframe": data.timeframe,
+        "structure": structure,
         "signal": signal,
-        "confidence": confidence,
-        "rsi": round(rsi_value, 2),
-        "last_close": close_price,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "timestamp": str(df["datetime"].iloc[-1]) if "datetime" in df.columns else str(df.index[-1]),
+        "entry": round(latest['close'], 5),
+        "stop_loss": round(stop_loss, 5) if stop_loss else None,
+        "take_profit": round(take_profit, 5) if take_profit else None
     }
-
-    return result
 
 
 @app.get("/")
 def home():
-    return {"message": "Market Signal API v2 is running successfully"}
+    return {"message": "EMA50 Pullback Pro Strategy running"}
