@@ -2,153 +2,142 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
-from ta.volatility import AverageTrueRange
 
-app = FastAPI(title="EMA50 Pullback Pro Strategy API")
+app = FastAPI(title="EMA50 Break & Pullback Strategy")
 
 
 class MarketData(BaseModel):
-    values: list  # must include open, high, low, close
+    values: list
     symbol: str
     timeframe: str
 
 
-# ---------------- STRUCTURE DETECTION ----------------
-def detect_structure(df):
-    highs = []
-    lows = []
+# =========================
+# HELPER FUNCTIONS
+# =========================
 
-    for i in range(2, len(df) - 2):
-        if df['high'][i] > df['high'][i-1] and df['high'][i] > df['high'][i-2] \
-           and df['high'][i] > df['high'][i+1] and df['high'][i] > df['high'][i+2]:
-            highs.append(df['high'][i])
+def is_bullish(candle):
+    return candle['close'] > candle['open']
 
-        if df['low'][i] < df['low'][i-1] and df['low'][i] < df['low'][i-2] \
-           and df['low'][i] < df['low'][i+1] and df['low'][i] < df['low'][i+2]:
-            lows.append(df['low'][i])
 
-    if len(highs) < 2 or len(lows) < 2:
-        return "NO_STRUCTURE"
+def is_bearish(candle):
+    return candle['close'] < candle['open']
 
-    if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+
+def detect_trend(df):
+    """
+    Confirm trend using:
+    1. Break of EMA50
+    2. New High or New Low compared to previous swing
+    """
+
+    latest = df.iloc[-1]
+    prev_high = df['high'].iloc[-5:-1].max()
+    prev_low = df['low'].iloc[-5:-1].min()
+
+    # ---- UPTREND CONDITION ----
+    if latest['close'] > latest['ema50'] and latest['high'] > prev_high:
         return "UPTREND"
 
-    elif highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+    # ---- DOWNTREND CONDITION ----
+    if latest['close'] < latest['ema50'] and latest['low'] < prev_low:
         return "DOWNTREND"
 
-    return "RANGE"
+    return "NO_TREND"
 
 
-# ---------------- CONFIRMATION ----------------
-def bullish_engulfing(prev, curr):
-    return (
-        curr['close'] > curr['open'] and
-        prev['close'] < prev['open'] and
-        curr['close'] > prev['open'] and
-        curr['open'] < prev['close']
-    )
+def detect_pullback(df, trend):
+    """
+    Wait for 2 corrective candles after trend confirmation
+    """
+
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-1]
+
+    if trend == "UPTREND":
+        # Two bearish candles = correction
+        if is_bearish(c1) and is_bearish(c2):
+            return "BUY"
+
+    if trend == "DOWNTREND":
+        # Two bullish candles = correction
+        if is_bullish(c1) and is_bullish(c2):
+            return "SELL"
+
+    return None
 
 
-def bearish_engulfing(prev, curr):
-    return (
-        curr['close'] < curr['open'] and
-        prev['close'] > prev['open'] and
-        curr['open'] > prev['close'] and
-        curr['close'] < prev['open']
-    )
+# =========================
+# MAIN ENDPOINT
+# =========================
 
-
-# ---------------- SIDEWAYS FILTER ----------------
-def is_trending(df):
-    ema_slope = df['ema50'].iloc[-1] - df['ema50'].iloc[-6]
-    return abs(ema_slope) > df['atr'].iloc[-1] * 0.2
-
-
-# ---------------- MAIN ENDPOINT ----------------
 @app.post("/analyze")
 def analyze(data: MarketData):
+
     df = pd.DataFrame(data.values)
 
-    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+    # Validation
+    required_cols = ['open', 'high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols):
         return {"error": "Missing OHLC data"}
 
-    if len(df) < 100:
+    if len(df) < 60:
         return {"error": "Not enough data"}
 
     df = df.iloc[::-1].reset_index(drop=True)
 
-    for col in ['open', 'high', 'low', 'close']:
+    for col in required_cols:
         df[col] = df[col].astype(float)
 
-    # Indicators
+    # EMA50
     df['ema50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-    atr_indicator = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
-    df['atr'] = atr_indicator.average_true_range()
 
-    structure = detect_structure(df)
+    # ---- STEP 1: Detect Confirmed Trend ----
+    trend = detect_trend(df)
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    signal = "NO_TRADE"
-    stop_loss = None
-    take_profit = None
-
-    # 🔥 Sideways filter
-    if not is_trending(df):
+    if trend == "NO_TREND":
         return {
             "symbol": data.symbol,
             "timeframe": data.timeframe,
-            "structure": "SIDEWAYS",
+            "trend": trend,
             "signal": "NO_TRADE"
         }
 
-    tolerance = df['atr'].iloc[-1] * 0.5
+    # ---- STEP 2: Wait for Pullback ----
+    signal = detect_pullback(df, trend)
 
-    # ================= BUY =================
-    if structure == "UPTREND":
+    if not signal:
+        return {
+            "symbol": data.symbol,
+            "timeframe": data.timeframe,
+            "trend": trend,
+            "signal": "WAIT_PULLBACK"
+        }
 
-        # price must be above EMA
-        if latest['close'] > latest['ema50']:
+    # ---- Risk Management ----
+    latest = df.iloc[-1]
 
-            # pullback must touch EMA zone
-            if abs(prev['close'] - prev['ema50']) <= tolerance:
+    if signal == "BUY":
+        stop_loss = df['low'].iloc[-5:-1].min()
+        risk = latest['close'] - stop_loss
+        take_profit = latest['close'] + (risk * 2)
 
-                # strong bullish confirmation
-                if bullish_engulfing(prev, latest):
-
-                    signal = "BUY"
-                    stop_loss = df['low'].iloc[-10:-1].min()
-
-                    risk = latest['close'] - stop_loss
-                    take_profit = latest['close'] + (risk * 2)
-
-    # ================= SELL =================
-    if structure == "DOWNTREND":
-
-        if latest['close'] < latest['ema50']:
-
-            if abs(prev['close'] - prev['ema50']) <= tolerance:
-
-                if bearish_engulfing(prev, latest):
-
-                    signal = "SELL"
-                    stop_loss = df['high'].iloc[-10:-1].max()
-
-                    risk = stop_loss - latest['close']
-                    take_profit = latest['close'] - (risk * 2)
+    elif signal == "SELL":
+        stop_loss = df['high'].iloc[-5:-1].max()
+        risk = stop_loss - latest['close']
+        take_profit = latest['close'] - (risk * 2)
 
     return {
         "symbol": data.symbol,
         "timeframe": data.timeframe,
-        "structure": structure,
+        "trend": trend,
         "signal": signal,
         "entry": round(latest['close'], 5),
-        "stop_loss": round(stop_loss, 5) if stop_loss else None,
-        "take_profit": round(take_profit, 5) if take_profit else None
+        "stop_loss": round(stop_loss, 5),
+        "take_profit": round(take_profit, 5)
     }
 
 
 @app.get("/")
 def home():
-    return {"message": "EMA50 Pullback Pro Strategy running"}
+    return {"message": "EMA50 Break & Pullback Strategy Running"}
