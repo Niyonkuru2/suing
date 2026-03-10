@@ -53,7 +53,7 @@ export const performAnalysis = async (symbol, timeframe) => {
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
   //const url = "https://five0ema-1-7wri.onrender.com/analyze";
-  //const url = "https://suing-s27n.onrender.com/analyze";
+  const url = "https://suing-s27n.onrender.com/analyze";
   const payload = { values: marketData, symbol, timeframe };
 
   try {
@@ -76,8 +76,7 @@ export const autoAnalyzeMarket = async () => {
     //{ symbol: "USD/CHF", timeframe: "5min" },
     //{ symbol: "NZD/USD", timeframe: "5min" },
     { symbol: "EUR/GBP", timeframe: "5min" },
-    { symbol: "AUD/USD", timeframe: "5min" },
-    { symbol: "XAU/USD", timeframe: "5min" }
+    { symbol: "AUD/USD", timeframe: "5min" }
   ];
 
   for (const pair of pairs) {
