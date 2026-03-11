@@ -69,14 +69,14 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
 export const autoAnalyzeMarket = async () => {
   // Use higher timeframe like H1 for better pullback signals
   const pairs = [
-    //{ symbol: "EUR/USD", timeframe: "5min" },
-    //{ symbol: "GBP/USD", timeframe: "5min" },
-    //{ symbol: "USD/JPY", timeframe: "5min" },
-     //{ symbol: "USD/CAD", timeframe: "5min" },
-    //{ symbol: "USD/CHF", timeframe: "5min" },
-    //{ symbol: "NZD/USD", timeframe: "5min" },
-    { symbol: "EUR/GBP", timeframe: "5min" },
-    { symbol: "AUD/USD", timeframe: "5min" }
+    { symbol: "EUR/USD", timeframe: "3min" },
+    { symbol: "GBP/USD", timeframe: "30min" },
+    { symbol: "USD/JPY", timeframe: "3min" },
+     { symbol: "USD/CAD", timeframe: "30min" },
+    { symbol: "USD/CHF", timeframe: "30min" },
+    { symbol: "NZD/USD", timeframe: "30min" },
+    { symbol: "EUR/GBP", timeframe: "30min" },
+    { symbol: "AUD/USD", timeframe: "30min" }
   ];
 
   for (const pair of pairs) {
