@@ -71,12 +71,12 @@ export const autoAnalyzeMarket = async () => {
   const pairs = [
     { symbol: "EUR/USD", timeframe: "30min" },
     { symbol: "GBP/USD", timeframe: "30min" },
-    { symbol: "USD/JPY", timeframe: "3min" },
-     { symbol: "USD/CAD", timeframe: "30min" },
+    { symbol: "USD/JPY", timeframe: "30min" },
+    { symbol: "USD/CAD", timeframe: "30min" },
     { symbol: "USD/CHF", timeframe: "30min" },
     { symbol: "NZD/USD", timeframe: "30min" },
+    { symbol: "GBP/JPY", timeframe: "30min" },
     { symbol: "EUR/GBP", timeframe: "30min" },
-    { symbol: "AUD/USD", timeframe: "30min" }
   ];
 
   for (const pair of pairs) {
