@@ -3,13 +3,35 @@ from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
 
-app = FastAPI(title="Triple EMA Trend Strategy API")
+app = FastAPI(title="Market Structure + EMA50 Strategy API")
 
 
 class MarketData(BaseModel):
     values: list
     symbol: str
     timeframe: str
+
+
+def detect_structure(df):
+    """
+    Detects HH/HL (uptrend) or LH/LL (downtrend)
+    """
+    highs = df['high']
+    lows = df['low']
+
+    # Last 3 swings
+    h1, h2, h3 = highs.iloc[-3], highs.iloc[-2], highs.iloc[-1]
+    l1, l2, l3 = lows.iloc[-3], lows.iloc[-2], lows.iloc[-1]
+
+    # Higher Highs & Higher Lows
+    if h3 > h2 > h1 and l3 > l2 > l1:
+        return "UPTREND"
+
+    # Lower Highs & Lower Lows
+    if h3 < h2 < h1 and l3 < l2 < l1:
+        return "DOWNTREND"
+
+    return "RANGE"
 
 
 @app.post("/analyze")
@@ -20,7 +42,7 @@ def analyze(data: MarketData):
     if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
         return {"error": "Missing OHLC data"}
 
-    if len(df) < 120:
+    if len(df) < 60:
         return {"error": "Not enough data"}
 
     # Latest candle at bottom
@@ -31,42 +53,29 @@ def analyze(data: MarketData):
         df[col] = df[col].astype(float)
 
     # =========================
-    # EMAs
+    # EMA 50
     # =========================
-    df['ema20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
     df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
-    df['ema100'] = EMAIndicator(close=df['close'], window=100).ema_indicator()
 
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
+
+    # =========================
+    # STRUCTURE DETECTION
+    # =========================
+    structure = detect_structure(df)
 
     signal = "NO_TRADE"
-    structure = "RANGE"
     stop_loss = None
     take_profit = None
-
-    # Distance check (EMAs spreading)
-    spread_up = (latest['ema20'] - latest['ema50']) > (prev['ema20'] - prev['ema50']) \
-                and (latest['ema50'] - latest['ema100']) > (prev['ema50'] - prev['ema100'])
-
-    spread_down = (latest['ema50'] - latest['ema20']) > (prev['ema50'] - prev['ema20']) \
-                  and (latest['ema100'] - latest['ema50']) > (prev['ema100'] - prev['ema50'])
 
     # =========================
     # BUY CONDITIONS
     # =========================
     if (
-        latest['close'] > latest['ema20'] > latest['ema50'] > latest['ema100']
-        and spread_up
+        latest['close'] > latest['ema50']
+        and structure == "UPTREND"
     ):
-
-        structure = "UPTREND"
-
-        # Pullback detection
-        if latest['low'] <= latest['ema20'] or latest['low'] <= latest['ema50']:
-            signal = "BUY_PULLBACK"
-        else:
-            signal = "BUY_ALERT"
+        signal = "BUY_TREND"
 
         stop_loss = df['low'].iloc[-6:-1].min()
         risk = latest['close'] - stop_loss
@@ -76,17 +85,10 @@ def analyze(data: MarketData):
     # SELL CONDITIONS
     # =========================
     elif (
-        latest['close'] < latest['ema20'] < latest['ema50'] < latest['ema100']
-        and spread_down
+        latest['close'] < latest['ema50']
+        and structure == "DOWNTREND"
     ):
-
-        structure = "DOWNTREND"
-
-        # Pullback detection
-        if latest['high'] >= latest['ema20'] or latest['high'] >= latest['ema50']:
-            signal = "SELL_PULLBACK"
-        else:
-            signal = "SELL_ALERT"
+        signal = "SELL_TREND"
 
         stop_loss = df['high'].iloc[-6:-1].max()
         risk = stop_loss - latest['close']
@@ -98,9 +100,7 @@ def analyze(data: MarketData):
         "structure": structure,
         "signal": signal,
         "entry": round(latest['close'], 5),
-        "ema20": round(latest['ema20'], 5),
         "ema50": round(latest['ema50'], 5),
-        "ema100": round(latest['ema100'], 5),
         "stop_loss": round(stop_loss, 5) if stop_loss else None,
         "take_profit": round(take_profit, 5) if take_profit else None
     }
@@ -108,4 +108,4 @@ def analyze(data: MarketData):
 
 @app.get("/")
 def home():
-    return {"message": "Triple EMA Strategy API running successfully"}
+    return {"message": "Market Structure + EMA50 API running successfully"}
