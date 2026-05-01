@@ -11,14 +11,14 @@ const PORT = process.env.PORT || 5000;
 // START SERVER
 // ======================================================
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
 
 // ======================================================
 // RUN ON STARTUP
 // ======================================================
 (async () => {
-  console.log("📊 Initial market scan started...");
+  console.log("Initial market scan started...");
   await autoAnalyzeMarket();
 })();
 
@@ -27,7 +27,7 @@ app.listen(PORT, () => {
 // Every 15 Minutes
 // ======================================================
 cron.schedule("*/15 * * * *", async () => {
-  console.log("📈 Running 15min market scan...");
+  console.log("Running 15min market scan...");
   await autoAnalyzeMarket();
 });
 
@@ -36,5 +36,5 @@ cron.schedule("*/15 * * * *", async () => {
 // Every Hour
 // ======================================================
 cron.schedule("0 * * * *", async () => {
-  console.log("🕐 Hourly trend synchronization...");
+  console.log("Hourly trend synchronization...");
 });
