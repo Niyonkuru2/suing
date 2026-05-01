@@ -3,109 +3,135 @@ from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
 
-app = FastAPI(title="Market Structure + EMA50 Strategy API")
+app = FastAPI(title="EMA50 Breakout + Volatility Detection API")
 
 
+# ==========================================
+# REQUEST MODEL
+# ==========================================
 class MarketData(BaseModel):
     values: list
     symbol: str
     timeframe: str
 
 
-def detect_structure(df):
+# ==========================================
+# VOLATILITY DETECTION
+# ==========================================
+def detect_volatility(df):
     """
-    Detects HH/HL (uptrend) or LH/LL (downtrend)
+    Detect if market volatility is HIGH / NORMAL / LOW
+    Based on average candle range of last 10 candles
     """
-    highs = df['high']
-    lows = df['low']
 
-    # Last 3 swings
-    h1, h2, h3 = highs.iloc[-3], highs.iloc[-2], highs.iloc[-1]
-    l1, l2, l3 = lows.iloc[-3], lows.iloc[-2], lows.iloc[-1]
+    # Candle range = High - Low
+    df["range"] = df["high"] - df["low"]
 
-    # Higher Highs & Higher Lows
-    if h3 > h2 > h1 and l3 > l2 > l1:
-        return "UPTREND"
+    recent_avg = df["range"].iloc[-10:].mean()
+    total_avg = df["range"].mean()
 
-    # Lower Highs & Lower Lows
-    if h3 < h2 < h1 and l3 < l2 < l1:
-        return "DOWNTREND"
+    if recent_avg > total_avg * 1.5:
+        return "HIGH"
 
-    return "RANGE"
+    elif recent_avg < total_avg * 0.7:
+        return "LOW"
+
+    return "NORMAL"
 
 
+# ==========================================
+# EMA CROSS DETECTION
+# ==========================================
+def detect_ema_cross(df):
+    """
+    Detect if price crossed above or below EMA50
+    """
+
+    prev = df.iloc[-2]
+    current = df.iloc[-1]
+
+    # Price moved from below EMA to above EMA
+    if prev["close"] < prev["ema50"] and current["close"] > current["ema50"]:
+        return "PRICE_CROSSED_ABOVE_EMA50"
+
+    # Price moved from above EMA to below EMA
+    elif prev["close"] > prev["ema50"] and current["close"] < current["ema50"]:
+        return "PRICE_CROSSED_BELOW_EMA50"
+
+    # Still above
+    elif current["close"] > current["ema50"]:
+        return "PRICE_ABOVE_EMA50"
+
+    # Still below
+    elif current["close"] < current["ema50"]:
+        return "PRICE_BELOW_EMA50"
+
+    return "ON_EMA50"
+
+
+# ==========================================
+# MAIN ANALYSIS ENDPOINT
+# ==========================================
 @app.post("/analyze")
 def analyze(data: MarketData):
 
     df = pd.DataFrame(data.values)
 
-    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+    required_cols = ["open", "high", "low", "close"]
+
+    if not all(col in df.columns for col in required_cols):
         return {"error": "Missing OHLC data"}
 
     if len(df) < 60:
-        return {"error": "Not enough data"}
+        return {"error": "At least 60 candles required"}
 
-    # Latest candle at bottom
+    # Reverse latest candle at bottom
     df = df.iloc[::-1].reset_index(drop=True)
 
     # Convert to float
-    for col in ['open', 'high', 'low', 'close']:
+    for col in required_cols:
         df[col] = df[col].astype(float)
 
-    # =========================
+    # ==========================================
     # EMA 50
-    # =========================
-    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
+    # ==========================================
+    df["ema50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
 
     latest = df.iloc[-1]
 
-    # =========================
-    # STRUCTURE DETECTION
-    # =========================
-    structure = detect_structure(df)
+    # ==========================================
+    # DETECT SIGNAL
+    # ==========================================
+    ema_signal = detect_ema_cross(df)
 
-    signal = "NO_TRADE"
-    stop_loss = None
-    take_profit = None
+    # ==========================================
+    # DETECT VOLATILITY
+    # ==========================================
+    volatility = detect_volatility(df)
 
-    # =========================
-    # BUY CONDITIONS
-    # =========================
-    if (
-        latest['close'] > latest['ema50']
-        and structure == "UPTREND"
-    ):
-        signal = "BUY_TREND"
-
-        stop_loss = df['low'].iloc[-6:-1].min()
-        risk = latest['close'] - stop_loss
-        take_profit = latest['close'] + (risk * 2)
-
-    # =========================
-    # SELL CONDITIONS
-    # =========================
-    elif (
-        latest['close'] < latest['ema50']
-        and structure == "DOWNTREND"
-    ):
-        signal = "SELL_TREND"
-
-        stop_loss = df['high'].iloc[-6:-1].max()
-        risk = stop_loss - latest['close']
-        take_profit = latest['close'] - (risk * 2)
-
+    # ==========================================
+    # RESPONSE
+    # ==========================================
     return {
         "symbol": data.symbol,
         "timeframe": data.timeframe,
-        "structure": structure,
-        "signal": signal,
-        "entry": round(latest['close'], 5),
-        "ema50": round(latest['ema50'], 5),
-        "stop_loss": round(stop_loss, 5) if stop_loss else None,
-        "take_profit": round(take_profit, 5) if take_profit else None
+        "price": round(latest["close"], 5),
+        "ema50": round(latest["ema50"], 5),
+        "ema_signal": ema_signal,
+        "volatility": volatility,
+        "message": (
+            "Check market structure before trading"
+            if volatility != "LOW"
+            else "Low volatility - avoid trading"
+        )
     }
 
 
+# ==========================================
+# ROOT
+# ==========================================
 @app.get("/")
 def home():
-    return {"message": "Market Structure + EMA50 API running successfully"}
+    return {
+        "message": "EMA50 Breakout + Volatility API running successfully"
+    }
