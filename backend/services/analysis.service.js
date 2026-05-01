@@ -291,9 +291,8 @@ export const autoAnalyzeMarket =
       "AUD/USD",
       "NZD/USD",
       "GBP/JPY",
-      "EUR/JPY",
-      "XAU/USD",
-      "BTC/USD",
+      "EUR/GBP",
+      "XAU/USD"
     ];
 
     for (const symbol of pairs) {
