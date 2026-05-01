@@ -1,128 +1,203 @@
 export const marketSignalEmailTemplate = (
   symbol,
   signal,
-  structure,
+  probability,
   timeframe,
-  entry,
-  stopLoss,
-  takeProfit
-) => `
+  price,
+  ema50,
+  volatility
+) => {
+  const isBuy = signal === "BUY";
+
+  const mainColor = isBuy ? "#16a34a" : "#dc2626";
+  const softColor = isBuy ? "#dcfce7" : "#fee2e2";
+  const signalText = isBuy ? "Bullish Setup" : "Bearish Setup";
+
+  return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Pullback Strategy Signal</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: 'Segoe UI', Arial, sans-serif;
-      background-color: #f4f4f7;
-    }
-    .container {
-      max-width: 640px;
-      margin: 40px auto;
-      background: #ffffff;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
-    }
-    .header {
-      background: ${signal === "BUY" ? "#28a745" : "#dc3545"};
-      color: #ffffff;
-      text-align: center;
-      padding: 25px 20px;
-      font-size: 26px;
-      font-weight: 600;
-      letter-spacing: 1px;
-    }
-    .content {
-      padding: 30px 40px;
-      color: #111827;
-      font-size: 16px;
-      line-height: 1.6;
-    }
-    .highlight {
-      background-color: #f3f4f6;
-      border-radius: 8px;
-      padding: 20px;
-      margin-top: 20px;
-    }
-    .signal-tag {
-      display: inline-block;
-      padding: 8px 18px;
-      border-radius: 6px;
-      color: #ffffff;
-      font-weight: bold;
-      background-color: ${signal === "BUY" ? "#28a745" : "#dc3545"};
-      text-transform: uppercase;
-    }
-    .footer {
-      text-align: center;
-      font-size: 13px;
-      color: #6b7280;
-      padding: 20px;
-      background-color: #f9fafb;
-      border-top: 1px solid #e5e7eb;
-    }
-    .risk-box {
-      margin-top: 20px;
-      padding: 15px;
-      border-left: 4px solid #111827;
-      background: #fafafa;
-      font-size: 14px;
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Trading Alert</title>
+
+<style>
+body{
+  margin:0;
+  padding:0;
+  background:#f3f4f6;
+  font-family:Arial, Helvetica, sans-serif;
+}
+
+.wrapper{
+  max-width:640px;
+  margin:30px auto;
+  background:#ffffff;
+  border-radius:14px;
+  overflow:hidden;
+  box-shadow:0 8px 24px rgba(0,0,0,0.08);
+}
+
+.header{
+  background:${mainColor};
+  color:#ffffff;
+  text-align:center;
+  padding:28px 20px;
+}
+
+.header h1{
+  margin:0;
+  font-size:28px;
+  letter-spacing:1px;
+}
+
+.header p{
+  margin-top:8px;
+  opacity:0.95;
+  font-size:15px;
+}
+
+.content{
+  padding:32px;
+  color:#111827;
+}
+
+.badge{
+  display:inline-block;
+  padding:8px 18px;
+  border-radius:999px;
+  background:${mainColor};
+  color:#fff;
+  font-weight:bold;
+  font-size:14px;
+}
+
+.card{
+  margin-top:24px;
+  border:1px solid #e5e7eb;
+  border-radius:12px;
+  overflow:hidden;
+}
+
+.row{
+  display:flex;
+  justify-content:space-between;
+  padding:14px 18px;
+  border-bottom:1px solid #f1f5f9;
+  font-size:15px;
+}
+
+.row:last-child{
+  border-bottom:none;
+}
+
+.label{
+  color:#6b7280;
+}
+
+.value{
+  font-weight:700;
+  color:#111827;
+}
+
+.score{
+  margin-top:22px;
+  background:${softColor};
+  border-left:5px solid ${mainColor};
+  padding:18px;
+  border-radius:10px;
+}
+
+.score h3{
+  margin:0 0 10px;
+  font-size:18px;
+}
+
+.note{
+  margin-top:22px;
+  background:#f9fafb;
+  padding:18px;
+  border-radius:10px;
+  font-size:14px;
+  line-height:1.7;
+  color:#374151;
+}
+
+.footer{
+  text-align:center;
+  padding:20px;
+  background:#f9fafb;
+  color:#6b7280;
+  font-size:13px;
+  border-top:1px solid #e5e7eb;
+}
+</style>
 </head>
+
 <body>
-  <div class="container">
-    <div class="header">
-      ${signal} SIGNAL – Pullback Trend Strategy
-    </div>
+<div class="wrapper">
 
-    <div class="content">
-      <p>Hello Trader,</p>
-
-      <p>
-        A new <strong>${signal}</strong> setup has been detected based on your 
-        <strong>Market Structure + EMA50 Pullback Strategy</strong>.
-      </p>
-
-      <div class="highlight">
-        <p><strong>Symbol:</strong> ${symbol}</p>
-        <p><strong>Timeframe:</strong> ${timeframe}</p>
-        <p><strong>Market Structure:</strong> ${structure}</p>
-        <p><strong>Signal:</strong> <span class="signal-tag">${signal}</span></p>
-        <p><strong>Entry Price:</strong> ${entry}</p>
-        <p><strong>Stop Loss:</strong> ${stopLoss}</p>
-        <p><strong>Take Profit:</strong> ${takeProfit}</p>
-        <p><strong>Risk : Reward:</strong> 1 : 2</p>
-      </div>
-
-      <div class="risk-box">
-        ⚠️ Trade only if all conditions align with your personal risk management rules.
-        Risk no more than 1–2% per trade. Discipline over emotion.
-      </div>
-
-      <p style="margin-top:20px;">
-        This signal was generated after:
-        <br/>
-        ✓ Confirmed market structure (HH/HL or LL/LH)
-        <br/>
-        ✓ EMA50 trend alignment
-        <br/>
-        ✓ Valid pullback
-        <br/>
-        ✓ Candle close confirmation
-      </p>
-    </div>
-
-    <div class="footer">
-      &copy; ${new Date().getFullYear()} Pullback Structure Bot<br/>
-      Powered by FastAPI × Node.js × Twelve Data
-    </div>
+  <div class="header">
+    <h1>${signal} ALERT</h1>
+    <p>${signalText} detected by Smart Scanner</p>
   </div>
+
+  <div class="content">
+
+    <span class="badge">${signal}</span>
+
+    <div class="card">
+      <div class="row">
+        <span class="label">Symbol</span>
+        <span class="value">${symbol}</span>
+      </div>
+
+      <div class="row">
+        <span class="label">Timeframe</span>
+        <span class="value">${timeframe}</span>
+      </div>
+
+      <div class="row">
+        <span class="label">Current Price</span>
+        <span class="value">${price}</span>
+      </div>
+
+      <div class="row">
+        <span class="label">EMA 50</span>
+        <span class="value">${ema50}</span>
+      </div>
+
+      <div class="row">
+        <span class="label">Volatility</span>
+        <span class="value">${volatility}</span>
+      </div>
+    </div>
+
+    <div class="score">
+      <h3>Probability Score: ${probability}</h3>
+      <p>
+        Setup aligned with higher timeframe trend and lower timeframe trigger.
+      </p>
+    </div>
+
+    <div class="note">
+      <strong>Execution Checklist:</strong><br/>
+      ✓ Confirm candle close<br/>
+      ✓ Avoid entering before breakout confirmation<br/>
+      ✓ Respect stop loss<br/>
+      ✓ Risk only 1%–2% per trade<br/>
+      ✓ Check major news events before entry
+    </div>
+
+  </div>
+
+  <div class="footer">
+    © ${new Date().getFullYear()} Smart Trading Bot<br/>
+    Powered by FastAPI × Node.js × Twelve Data
+  </div>
+
+</div>
 </body>
 </html>
 `;
+};
