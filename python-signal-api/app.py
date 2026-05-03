@@ -1,27 +1,21 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
-from ta.trend import EMAIndicator
+from datetime import datetime
 
-app = FastAPI(title="EMA50 MTF Strategy API")
+app = FastAPI(title="SMC Day Trading MTF Engine")
 
 
 # ==========================================
-# REQUEST MODELS
+# MODELS
 # ==========================================
-class MarketData(BaseModel):
-    values: list
-    symbol: str
-    timeframe: str
-
-
 class BacktestRequest(BaseModel):
     values_30m: list
     values_1h: list
 
 
 # ==========================================
-# HELPERS
+# PREPROCESS
 # ==========================================
 def preprocess(df):
     df = pd.DataFrame(df)
@@ -30,47 +24,89 @@ def preprocess(df):
     for col in ["open", "high", "low", "close"]:
         df[col] = df[col].astype(float)
 
-    df["ema50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
     return df
 
 
-def is_bullish(c): return c["close"] > c["open"]
-def is_bearish(c): return c["close"] < c["open"]
+# ==========================================
+# SESSION FILTER (LONDON / NEW YORK)
+# ==========================================
+def is_active_session():
+    hour = datetime.utcnow().hour
+
+    # London session (7–16 UTC)
+    london = 7 <= hour <= 16
+
+    # New York session (12–21 UTC)
+    ny = 12 <= hour <= 21
+
+    return london or ny
 
 
 # ==========================================
-# VOLATILITY
+# LIQUIDITY SWEEP DETECTION
 # ==========================================
-def detect_volatility(df):
-    df["range"] = df["high"] - df["low"]
+def detect_liquidity_sweep(df):
+    last = df.iloc[-1]
 
-    recent = df["range"].iloc[-10:].mean()
-    overall = df["range"].mean()
+    prev_high = df["high"].iloc[-20:-2].max()
+    prev_low = df["low"].iloc[-20:-2].min()
 
-    if recent > overall * 1.5:
-        return "HIGH"
-    elif recent < overall * 0.7:
-        return "LOW"
-    return "NORMAL"
+    # Buy-side liquidity sweep
+    if last["high"] > prev_high and last["close"] < prev_high:
+        return "SWEEP_HIGH"
+
+    # Sell-side liquidity sweep
+    if last["low"] < prev_low and last["close"] > prev_low:
+        return "SWEEP_LOW"
+
+    return None
 
 
 # ==========================================
-# 1H TREND (HIGH TIMEFRAME)
+# STRUCTURE (BOS / CHOCH)
+# ==========================================
+def detect_structure(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    prev_high = df["high"].iloc[-20:-2].max()
+    prev_low = df["low"].iloc[-20:-2].min()
+
+    # BOS UP
+    if last["close"] > prev_high:
+        return "BOS_UP"
+
+    # BOS DOWN
+    if last["close"] < prev_low:
+        return "BOS_DOWN"
+
+    # CHOCH UP (reversal)
+    if prev["close"] < prev_low and last["close"] > prev_low:
+        return "CHOCH_UP"
+
+    # CHOCH DOWN
+    if prev["close"] > prev_high and last["close"] < prev_high:
+        return "CHOCH_DOWN"
+
+    return "RANGE"
+
+
+# ==========================================
+# TREND (1H CONFIRMATION)
 # ==========================================
 def detect_trend(df_1h):
     last = df_1h.iloc[-1]
-    prev = df_1h.iloc[-2]
 
-    if prev["close"] < prev["ema50"] and last["close"] > last["ema50"]:
+    prev_high = df_1h["high"].iloc[-10:].max()
+    prev_low = df_1h["low"].iloc[-10:].min()
+
+    if last["close"] > prev_high:
         return "BULLISH"
 
-    if prev["close"] > prev["ema50"] and last["close"] < last["ema50"]:
+    if last["close"] < prev_low:
         return "BEARISH"
 
-    if last["close"] > last["ema50"]:
-        return "BULLISH"
-
-    return "BEARISH"
+    return "RANGE"
 
 
 # ==========================================
@@ -80,21 +116,19 @@ def detect_entry(df_30m, trend):
 
     last = df_30m.iloc[-1]
 
-    # Pullback candles
-    pullback = df_30m.iloc[-4:-2]
+    sweep = detect_liquidity_sweep(df_30m)
+    structure = detect_structure(df_30m)
 
-    bearish_pullback = all(is_bearish(c) for _, c in pullback.iterrows())
-    bullish_pullback = all(is_bullish(c) for _, c in pullback.iterrows())
+    prev_high = df_30m["high"].iloc[-20:-2].max()
+    prev_low = df_30m["low"].iloc[-20:-2].min()
 
-    # Structure
-    swing_high = df_30m["high"].iloc[-6:-2].max()
-    swing_low = df_30m["low"].iloc[-6:-2].min()
+    # ================= BUY SETUP =================
+    if trend == "BULLISH" and sweep == "SWEEP_LOW":
 
-    # ENTRY CONDITIONS
-    if trend == "BULLISH" and bearish_pullback:
-        if last["close"] > swing_high:
+        if structure in ["CHOCH_UP", "BOS_UP"]:
+
             entry = last["close"]
-            sl = swing_low
+            sl = prev_low
             tp = entry + (entry - sl) * 2
 
             return {
@@ -102,13 +136,16 @@ def detect_entry(df_30m, trend):
                 "entry": entry,
                 "stop_loss": sl,
                 "take_profit": tp,
-                "structure": "MTF_PULLBACK_BUY"
+                "structure": structure
             }
 
-    if trend == "BEARISH" and bullish_pullback:
-        if last["close"] < swing_low:
+    # ================= SELL SETUP =================
+    if trend == "BEARISH" and sweep == "SWEEP_HIGH":
+
+        if structure in ["CHOCH_DOWN", "BOS_DOWN"]:
+
             entry = last["close"]
-            sl = swing_high
+            sl = prev_high
             tp = entry - (sl - entry) * 2
 
             return {
@@ -116,17 +153,23 @@ def detect_entry(df_30m, trend):
                 "entry": entry,
                 "stop_loss": sl,
                 "take_profit": tp,
-                "structure": "MTF_PULLBACK_SELL"
+                "structure": structure
             }
 
     return {"signal": "NO_TRADE"}
 
 
 # ==========================================
-# MAIN ANALYSIS (MTF)
+# MAIN ANALYSIS (MTF DAY TRADING)
 # ==========================================
 @app.post("/analyze-mtf")
 def analyze_mtf(data: BacktestRequest):
+
+    if not is_active_session():
+        return {
+            "signal": "NO_TRADE",
+            "reason": "NO_SESSION"
+        }
 
     df_30m = preprocess(data.values_30m)
     df_1h = preprocess(data.values_1h)
@@ -134,20 +177,12 @@ def analyze_mtf(data: BacktestRequest):
     if len(df_30m) < 60 or len(df_1h) < 60:
         return {"error": "Not enough data"}
 
-    volatility = detect_volatility(df_30m)
     trend = detect_trend(df_1h)
-
-    if volatility == "LOW":
-        return {
-            "signal": "NO_TRADE",
-            "reason": "LOW_VOLATILITY"
-        }
-
     trade = detect_entry(df_30m, trend)
 
     return {
         "trend": trend,
-        "volatility": volatility,
+        "session": "ACTIVE",
         **trade
     }
 
@@ -168,12 +203,11 @@ def backtest(data: BacktestRequest):
     for i in range(60, len(df_30m) - 10):
 
         slice_30m = df_30m.iloc[:i]
-        slice_1h = df_1h.iloc[:i // 2]  # approximate alignment
+        slice_1h = df_1h.iloc[:max(30, i // 2)]
 
-        volatility = detect_volatility(slice_30m)
         trend = detect_trend(slice_1h)
 
-        if volatility == "LOW":
+        if not is_active_session():
             continue
 
         trade = detect_entry(slice_30m, trend)
@@ -193,6 +227,7 @@ def backtest(data: BacktestRequest):
         hit_sl = False
 
         for _, candle in future.iterrows():
+
             if trade["signal"] == "BUY":
                 if candle["low"] <= sl:
                     hit_sl = True
@@ -229,4 +264,6 @@ def backtest(data: BacktestRequest):
 # ==========================================
 @app.get("/")
 def home():
-    return {"message": "MTF EMA Strategy API Running"}
+    return {
+        "message": "SMC Day Trading MTF Engine Running (London/NY + BOS + CHoCH + Liquidity)"
+    }
