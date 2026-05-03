@@ -1,307 +1,149 @@
+// ==========================================
+// IMPORTS
+// ==========================================
 import axios from "axios";
+import cron from "node-cron";
 import { sendAlertEmail } from "../config/mail.config.js";
 import { marketSignalEmailTemplate } from "../utils/sendAlertEmail.js";
 
-// =====================================================
-// PROFESSIONAL SMART DAY-TRADING SCANNER
-// Strategy:
-// 1H   = Trend Direction
-// 15m  = Entry Trigger
-// EMA50 + Volatility + Session Filter
-// Email Alerts
-// Duplicate Protection
-// =====================================================
+// ==========================================
+// CONFIG
+// ==========================================
+const TWELVE_API_KEY = process.env.TWELVE_DATA_API_KEY;
+const PYTHON_API_URL = "https://five0ema.onrender.com/analyze-mtf";
 
-// ---------------------------------------------
-// MEMORY FOR DUPLICATE SIGNALS
-// ---------------------------------------------
-const sentSignals = new Map();
+// Prevent duplicate signals
+const lastSignals = new Map();
 
-// expire old alerts after 2 hours
-const ALERT_TTL = 1000 * 60 * 120;
+// ==========================================
+// FETCH MARKET DATA (30m + 1H)
+// ==========================================
+const fetchMarketData = async (symbol) => {
+  const url30m = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=30min&outputsize=200&apikey=${TWELVE_API_KEY}`;
+  const url1h = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=1h&outputsize=200&apikey=${TWELVE_API_KEY}`;
 
-// =====================================================
-// UTILITIES
-// =====================================================
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const [res30m, res1h] = await Promise.all([
+      axios.get(url30m),
+      axios.get(url1h),
+    ]);
 
-// Kigali timezone trading sessions
-const isTradingSession = () => {
-  const now = new Date();
+    if (res30m.data.status === "error") throw new Error(res30m.data.message);
+    if (res1h.data.status === "error") throw new Error(res1h.data.message);
 
-  const kigaliHour = Number(
-    now.toLocaleString("en-US", {
-      timeZone: "Africa/Kigali",
-      hour: "2-digit",
-      hour12: false,
-    })
+    return {
+      values_30m: res30m.data.values,
+      values_1h: res1h.data.values,
+    };
+  } catch (error) {
+    console.error(`Data fetch failed for ${symbol}:`, error.message);
+    throw error;
+  }
+};
+
+// ==========================================
+// CALL PYTHON API (MTF STRATEGY)
+// ==========================================
+const runPythonAnalysis = async (values_30m, values_1h) => {
+  try {
+    const response = await axios.post(PYTHON_API_URL, {
+      values_30m,
+      values_1h,
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error("FastAPI request failed:", error.message);
+    throw new Error("Python API failed");
+  }
+};
+
+// ==========================================
+// PROCESS SIGNAL + EMAIL ALERT
+// ==========================================
+const handleSignal = async (symbol, result) => {
+  const { signal, entry, stop_loss, take_profit, trend, volatility, structure } = result;
+
+  // Skip if no signal
+  if (!["BUY", "SELL"].includes(signal)) {
+    console.log(
+      `No trade → ${symbol} | Trend: ${trend} | Volatility: ${volatility}`
+    );
+    return;
+  }
+
+  // Prevent duplicate alerts
+  const signalKey = `${symbol}_${signal}`;
+
+  if (lastSignals.get(symbol) === signalKey) {
+    console.log(`⚠️ Duplicate signal skipped → ${symbol}`);
+    return;
+  }
+
+  lastSignals.set(symbol, signalKey);
+
+  // TradingView chart link
+  const chartLink = `https://www.tradingview.com/chart/?symbol=${symbol.replace("/", "")}`;
+
+  // Generate email
+  const emailHTML = marketSignalEmailTemplate(
+    symbol,
+    signal,
+    structure,
+    "30min (Entry) / 1H (Trend)",
+    entry,
+    stop_loss,
+    take_profit,
+    chartLink
   );
 
-  // London + NY useful hours
-  return kigaliHour >= 10 && kigaliHour <= 20;
+  // Send email
+  await sendAlertEmail(`${symbol} ${signal} Signal`, emailHTML);
+
+  console.log(
+    `SIGNAL SENT → ${symbol} ${signal}\nEntry: ${entry} | SL: ${stop_loss} | TP: ${take_profit}`
+  );
 };
 
-const cleanOldSignals = () => {
-  const now = Date.now();
-
-  for (const [key, value] of sentSignals.entries()) {
-    if (now - value > ALERT_TTL) {
-      sentSignals.delete(key);
-    }
-  }
-};
-
-// =====================================================
-// FETCH DATA FROM TWELVEDATA
-// =====================================================
-const fetchMarketData = async (symbol, timeframe) => {
-  const apiKey = process.env.TWELVE_DATA_API_KEY;
-
-  const url =
-    `https://api.twelvedata.com/time_series` +
-    `?symbol=${symbol}` +
-    `&interval=${timeframe}` +
-    `&outputsize=200` +
-    `&apikey=${apiKey}`;
-
-  const response = await axios.get(url);
-
-  if (response.data.status === "error") {
-    throw new Error(response.data.message);
-  }
-
-  return response.data.values;
-};
-
-// =====================================================
-// CALL FASTAPI
-// =====================================================
-const runPythonAnalysis = async (
-  values,
-  symbol,
-  timeframe
-) => {
-  const url =
-    "https://suing-s27n.onrender.com/analyze";
-
-  const response = await axios.post(url, {
-    values,
-    symbol,
-    timeframe,
-  });
-
-  return response.data;
-};
-
-// =====================================================
-// PROBABILITY SCORE
-// =====================================================
-const calculateScore = (
-  trend,
-  trigger,
-  volatility
-) => {
-  let score = 0;
-
-  if (trend === "PRICE_ABOVE_EMA50") score += 35;
-  if (trend === "PRICE_BELOW_EMA50") score += 35;
-
-  if (
-    trigger === "PRICE_CROSSED_ABOVE_EMA50" ||
-    trigger === "PRICE_CROSSED_BELOW_EMA50"
-  ) {
-    score += 40;
-  }
-
-  if (volatility === "HIGH") score += 25;
-  if (volatility === "NORMAL") score += 15;
-  if (volatility === "LOW") score -= 20;
-
-  return Math.max(0, Math.min(100, score));
-};
-
-// =====================================================
-// CORE ANALYSIS
-// =====================================================
-export const performAnalysis = async (
-  symbol
-) => {
+// ==========================================
+// MAIN ANALYSIS FUNCTION
+// ==========================================
+export const performAnalysis = async (symbol) => {
   try {
-    // ------------------------------
-    // SESSION FILTER
-    // ------------------------------
-    if (!isTradingSession()) {
-      console.log(
-        `${symbol}: Outside active session`
-      );
-      return;
-    }
+    console.log(`🔍 Analyzing ${symbol}...`);
 
-    // ------------------------------
-    // FETCH BOTH TIMEFRAMES
-    // ------------------------------
-    const h1Data = await fetchMarketData(
-      symbol,
-      "1h"
-    );
+    // 1. Fetch data
+    const { values_30m, values_1h } = await fetchMarketData(symbol);
 
-    await sleep(500);
+    // 2. Run strategy
+    const result = await runPythonAnalysis(values_30m, values_1h);
 
-    const m15Data = await fetchMarketData(
-      symbol,
-      "15min"
-    );
+    // 3. Handle result
+    await handleSignal(symbol, result);
 
-    // ------------------------------
-    // ANALYZE BOTH
-    // ------------------------------
-    const trend = await runPythonAnalysis(
-      h1Data,
-      symbol,
-      "1h"
-    );
-
-    const entry = await runPythonAnalysis(
-      m15Data,
-      symbol,
-      "15min"
-    );
-
-    // ------------------------------
-    // TREND LOGIC
-    // ------------------------------
-    const bullishTrend =
-      trend.ema_signal ===
-      "PRICE_ABOVE_EMA50";
-
-    const bearishTrend =
-      trend.ema_signal ===
-      "PRICE_BELOW_EMA50";
-
-    const bullishTrigger =
-      entry.ema_signal ===
-      "PRICE_CROSSED_ABOVE_EMA50";
-
-    const bearishTrigger =
-      entry.ema_signal ===
-      "PRICE_CROSSED_BELOW_EMA50";
-
-    let signal = "NO TRADE";
-
-    if (bullishTrend && bullishTrigger) {
-      signal = "BUY";
-    }
-
-    if (bearishTrend && bearishTrigger) {
-      signal = "SELL";
-    }
-
-    if (signal === "NO TRADE") {
-      console.log(
-        `${symbol}: no aligned setup`
-      );
-      return;
-    }
-
-    // ------------------------------
-    // VOLATILITY FILTER
-    // ------------------------------
-    if (entry.volatility === "LOW") {
-      console.log(
-        `${symbol}: low volatility skipped`
-      );
-      return;
-    }
-
-    // ------------------------------
-    // DUPLICATE FILTER
-    // ------------------------------
-    cleanOldSignals();
-
-    const key =
-      `${symbol}_${signal}_${entry.timeframe}`;
-
-    if (sentSignals.has(key)) {
-      console.log(
-        `${symbol}: duplicate skipped`
-      );
-      return;
-    }
-
-    sentSignals.set(key, Date.now());
-
-    // ------------------------------
-    // SCORE
-    // ------------------------------
-    const score = calculateScore(
-      trend.ema_signal,
-      entry.ema_signal,
-      entry.volatility
-    );
-
-    // only strong setups
-    if (score < 70) {
-      console.log(
-        `${symbol}: weak setup ${score}%`
-      );
-      return;
-    }
-
-    // ------------------------------
-    // SEND ALERT
-    // ------------------------------
-    const html =
-      marketSignalEmailTemplate(
-        symbol,
-        signal,
-        `${score}% Probability`,
-        entry.timeframe,
-        entry.price,
-        entry.ema50,
-        entry.volatility
-      );
-
-    await sendAlertEmail(
-      `${symbol} ${signal} Setup (${score}%)`,
-      html
-    );
-
-    console.log(
-      `ALERT => ${symbol} ${signal} ${score}%`
-    );
-  } catch (error) {
-    console.error(
-      `${symbol} failed:`,
-      error.message
-    );
+    return result;
+  } catch (err) {
+    console.error(`Analysis failed for ${symbol}:`, err.message);
   }
 };
 
-// =====================================================
-// AUTO MARKET SCANNER
-// =====================================================
-export const autoAnalyzeMarket =
-  async () => {
-    const pairs = [
-      "EUR/USD",
-      "GBP/USD",
-      "USD/JPY",
-      "USD/CHF",
-      "USD/CAD",
-      "AUD/USD",
-      "NZD/USD",
-      "GBP/JPY",
-      "EUR/GBP",
-      "XAU/USD"
-    ];
+// ==========================================
+// AUTO MARKET SCAN
+// ==========================================
+export const autoAnalyzeMarket = async () => {
+  const pairs = [
+    "EUR/USD",
+    "GBP/USD",
+    "USD/JPY",
+    "USD/CAD",
+    "USD/CHF",
+    "NZD/USD",
+    "GBP/JPY",
+    "EUR/GBP",
+  ];
 
-    for (const symbol of pairs) {
-      console.log(
-        `Scanning ${symbol}...`
-      );
-
-      await performAnalysis(symbol);
-
-      await sleep(1000);
-    }
-  };
+  for (const symbol of pairs) {
+    await performAnalysis(symbol);
+  }
+};
+})();
