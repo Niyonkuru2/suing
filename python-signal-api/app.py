@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
@@ -17,8 +16,6 @@ class BacktestRequest(BaseModel):
 
 # =====================================================
 # PREPROCESS (TWELVEDATA READY)
-# Works with:
-# datetime, open, high, low, close, volume(optional)
 # =====================================================
 def preprocess(data):
     df = pd.DataFrame(data)
@@ -26,30 +23,28 @@ def preprocess(data):
     if df.empty:
         return df
 
-    # TwelveData returns newest first -> reverse
+    # TwelveData returns newest first
     df = df.iloc[::-1].reset_index(drop=True)
 
-    # Support datetime/time
+    # Detect time column
     if "datetime" in df.columns:
         df["time"] = pd.to_datetime(df["datetime"], errors="coerce")
-
     elif "time" in df.columns:
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
-
     else:
         raise ValueError("No datetime/time column found")
 
-    # Numeric OHLC
+    # Convert numeric columns
     for col in ["open", "high", "low", "close"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # TwelveData forex may not have volume
+    # Forex pairs often no volume
     if "volume" not in df.columns:
         df["volume"] = 1000
 
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(1000)
 
-    # Remove bad rows
+    # Remove invalid rows
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
 
@@ -73,8 +68,6 @@ def is_active_session(candle_time):
 # =====================================================
 def is_news_time(candle_time):
     hour = candle_time.hour
-
-    # avoid high volatility hours
     return hour in [13, 14]
 
 
@@ -226,10 +219,18 @@ def detect_entry(df_30m, trend):
     candle_time = last["time"]
 
     if not is_active_session(candle_time):
-        return {"signal": "NO_TRADE", "reason": "NO_SESSION"}
+        return {
+            "signal": "NO_TRADE",
+            "reason": "NO_SESSION",
+            "trend": trend
+        }
 
     if is_news_time(candle_time):
-        return {"signal": "NO_TRADE", "reason": "NEWS_TIME"}
+        return {
+            "signal": "NO_TRADE",
+            "reason": "NEWS_TIME",
+            "trend": trend
+        }
 
     sweep = detect_liquidity_sweep(df_30m)
     structure = detect_structure(df_30m)
@@ -238,11 +239,16 @@ def detect_entry(df_30m, trend):
     vol_ok = volume_confirm(df_30m)
 
     if not vol_ok:
-        return {"signal": "NO_TRADE", "reason": "LOW_VOLUME"}
+        return {
+            "signal": "NO_TRADE",
+            "reason": "LOW_VOLUME",
+            "trend": trend,
+            "structure": structure
+        }
 
     atr = calculate_atr(df_30m)
 
-    # ========================= BUY =========================
+    # BUY
     if (
         trend == "BULLISH"
         and sweep == "SWEEP_LOW"
@@ -251,20 +257,18 @@ def detect_entry(df_30m, trend):
         and ob == "BULLISH_OB"
     ):
         entry = last["close"]
-        sl = entry - atr * 1.5
-        tp = entry + atr * 3
 
         return {
             "signal": "BUY",
             "entry": round(entry, 5),
-            "stop_loss": round(sl, 5),
-            "take_profit": round(tp, 5),
+            "stop_loss": round(entry - atr * 1.5, 5),
+            "take_profit": round(entry + atr * 3, 5),
             "trend": trend,
             "structure": structure,
             "atr": round(atr, 5)
         }
 
-    # ========================= SELL =========================
+    # SELL
     if (
         trend == "BEARISH"
         and sweep == "SWEEP_HIGH"
@@ -273,14 +277,12 @@ def detect_entry(df_30m, trend):
         and ob == "BEARISH_OB"
     ):
         entry = last["close"]
-        sl = entry + atr * 1.5
-        tp = entry - atr * 3
 
         return {
             "signal": "SELL",
             "entry": round(entry, 5),
-            "stop_loss": round(sl, 5),
-            "take_profit": round(tp, 5),
+            "stop_loss": round(entry + atr * 1.5, 5),
+            "take_profit": round(entry - atr * 3, 5),
             "trend": trend,
             "structure": structure,
             "atr": round(atr, 5)
@@ -328,4 +330,3 @@ def home():
     return {
         "message": "SMC PRO MTF Engine v3 Running | TwelveData Compatible"
     }
-```
