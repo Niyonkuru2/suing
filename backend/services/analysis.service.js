@@ -10,6 +10,7 @@ const PYTHON_API_URL = "https://suing-s27n.onrender.com/analyze-mtf";
 
 // Prevent duplicate alerts
 const lastSignals = new Map();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ==========================================
 // FETCH MARKET DATA (30m + 1H)
@@ -72,7 +73,7 @@ const handleSignal = async (symbol, result) => {
   // Prevent duplicate alerts
   const key = `${symbol}_${signal}`;
   if (lastSignals.get(symbol) === key) {
-    console.log(`⚠️ Duplicate skipped → ${symbol}`);
+    console.log(`Duplicate skipped → ${symbol}`);
     return;
   }
 
@@ -125,10 +126,20 @@ export const performAnalysis = async (symbol) => {
 // ==========================================
 // AUTO MARKET LOOP
 // ==========================================
+let isRunning = false;
+
 export const autoAnalyzeMarket = async () => {
-  const pairs = [
-    "EUR/USD",
-     "GBP/USD",
+  if (isRunning) {
+    console.log("Previous scan still running. Skipping...");
+    return;
+  }
+
+  isRunning = true;
+
+  try {
+    const pairs = [
+      "EUR/USD",
+      "GBP/USD",
       "USD/JPY",
       "USD/CHF",
       "USD/CAD",
@@ -137,9 +148,13 @@ export const autoAnalyzeMarket = async () => {
       "GBP/JPY",
       "EUR/GBP",
       "XAU/USD"
-  ];
+    ];
 
-  for (const symbol of pairs) {
-    await performAnalysis(symbol);
+    for (const symbol of pairs) {
+      await performAnalysis(symbol);
+      await sleep(15000);
+    }
+  } finally {
+    isRunning = false;
   }
 };
