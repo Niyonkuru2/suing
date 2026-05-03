@@ -3,11 +3,11 @@ from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
 
-app = FastAPI(title="EMA50 Breakout + Volatility Detection API")
+app = FastAPI(title="EMA50 MTF Strategy API")
 
 
 # ==========================================
-# REQUEST MODEL
+# REQUEST MODELS
 # ==========================================
 class MarketData(BaseModel):
     values: list
@@ -15,115 +15,212 @@ class MarketData(BaseModel):
     timeframe: str
 
 
+class BacktestRequest(BaseModel):
+    values_30m: list
+    values_1h: list
+
+
 # ==========================================
-# VOLATILITY DETECTION
+# HELPERS
+# ==========================================
+def preprocess(df):
+    df = pd.DataFrame(df)
+    df = df.iloc[::-1].reset_index(drop=True)
+
+    for col in ["open", "high", "low", "close"]:
+        df[col] = df[col].astype(float)
+
+    df["ema50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
+    return df
+
+
+def is_bullish(c): return c["close"] > c["open"]
+def is_bearish(c): return c["close"] < c["open"]
+
+
+# ==========================================
+# VOLATILITY
 # ==========================================
 def detect_volatility(df):
-    """
-    Detect if market volatility is HIGH / NORMAL / LOW
-    Based on average candle range of last 10 candles
-    """
-
-    # Candle range = High - Low
     df["range"] = df["high"] - df["low"]
 
-    recent_avg = df["range"].iloc[-10:].mean()
-    total_avg = df["range"].mean()
+    recent = df["range"].iloc[-10:].mean()
+    overall = df["range"].mean()
 
-    if recent_avg > total_avg * 1.5:
+    if recent > overall * 1.5:
         return "HIGH"
-
-    elif recent_avg < total_avg * 0.7:
+    elif recent < overall * 0.7:
         return "LOW"
-
     return "NORMAL"
 
 
 # ==========================================
-# EMA CROSS DETECTION
+# 1H TREND (HIGH TIMEFRAME)
 # ==========================================
-def detect_ema_cross(df):
-    """
-    Detect if price crossed above or below EMA50
-    """
+def detect_trend(df_1h):
+    last = df_1h.iloc[-1]
+    prev = df_1h.iloc[-2]
 
-    prev = df.iloc[-2]
-    current = df.iloc[-1]
+    if prev["close"] < prev["ema50"] and last["close"] > last["ema50"]:
+        return "BULLISH"
 
-    # Price moved from below EMA to above EMA
-    if prev["close"] < prev["ema50"] and current["close"] > current["ema50"]:
-        return "PRICE_CROSSED_ABOVE_EMA50"
+    if prev["close"] > prev["ema50"] and last["close"] < last["ema50"]:
+        return "BEARISH"
 
-    # Price moved from above EMA to below EMA
-    elif prev["close"] > prev["ema50"] and current["close"] < current["ema50"]:
-        return "PRICE_CROSSED_BELOW_EMA50"
+    if last["close"] > last["ema50"]:
+        return "BULLISH"
 
-    # Still above
-    elif current["close"] > current["ema50"]:
-        return "PRICE_ABOVE_EMA50"
-
-    # Still below
-    elif current["close"] < current["ema50"]:
-        return "PRICE_BELOW_EMA50"
-
-    return "ON_EMA50"
+    return "BEARISH"
 
 
 # ==========================================
-# MAIN ANALYSIS ENDPOINT
+# ENTRY LOGIC (30M)
 # ==========================================
-@app.post("/analyze")
-def analyze(data: MarketData):
+def detect_entry(df_30m, trend):
 
-    df = pd.DataFrame(data.values)
+    last = df_30m.iloc[-1]
 
-    required_cols = ["open", "high", "low", "close"]
+    # Pullback candles
+    pullback = df_30m.iloc[-4:-2]
 
-    if not all(col in df.columns for col in required_cols):
-        return {"error": "Missing OHLC data"}
+    bearish_pullback = all(is_bearish(c) for _, c in pullback.iterrows())
+    bullish_pullback = all(is_bullish(c) for _, c in pullback.iterrows())
 
-    if len(df) < 60:
-        return {"error": "At least 60 candles required"}
+    # Structure
+    swing_high = df_30m["high"].iloc[-6:-2].max()
+    swing_low = df_30m["low"].iloc[-6:-2].min()
 
-    # Reverse latest candle at bottom
-    df = df.iloc[::-1].reset_index(drop=True)
+    # ENTRY CONDITIONS
+    if trend == "BULLISH" and bearish_pullback:
+        if last["close"] > swing_high:
+            entry = last["close"]
+            sl = swing_low
+            tp = entry + (entry - sl) * 2
 
-    # Convert to float
-    for col in required_cols:
-        df[col] = df[col].astype(float)
+            return {
+                "signal": "BUY",
+                "entry": entry,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "structure": "MTF_PULLBACK_BUY"
+            }
 
-    # ==========================================
-    # EMA 50
-    # ==========================================
-    df["ema50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
+    if trend == "BEARISH" and bullish_pullback:
+        if last["close"] < swing_low:
+            entry = last["close"]
+            sl = swing_high
+            tp = entry - (sl - entry) * 2
 
-    latest = df.iloc[-1]
+            return {
+                "signal": "SELL",
+                "entry": entry,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "structure": "MTF_PULLBACK_SELL"
+            }
 
-    # ==========================================
-    # DETECT SIGNAL
-    # ==========================================
-    ema_signal = detect_ema_cross(df)
+    return {"signal": "NO_TRADE"}
 
-    # ==========================================
-    # DETECT VOLATILITY
-    # ==========================================
-    volatility = detect_volatility(df)
 
-    # ==========================================
-    # RESPONSE
-    # ==========================================
+# ==========================================
+# MAIN ANALYSIS (MTF)
+# ==========================================
+@app.post("/analyze-mtf")
+def analyze_mtf(data: BacktestRequest):
+
+    df_30m = preprocess(data.values_30m)
+    df_1h = preprocess(data.values_1h)
+
+    if len(df_30m) < 60 or len(df_1h) < 60:
+        return {"error": "Not enough data"}
+
+    volatility = detect_volatility(df_30m)
+    trend = detect_trend(df_1h)
+
+    if volatility == "LOW":
+        return {
+            "signal": "NO_TRADE",
+            "reason": "LOW_VOLATILITY"
+        }
+
+    trade = detect_entry(df_30m, trend)
+
     return {
-        "symbol": data.symbol,
-        "timeframe": data.timeframe,
-        "price": round(latest["close"], 5),
-        "ema50": round(latest["ema50"], 5),
-        "ema_signal": ema_signal,
+        "trend": trend,
         "volatility": volatility,
-        "message": (
-            "Check market structure before trading"
-            if volatility != "LOW"
-            else "Low volatility - avoid trading"
-        )
+        **trade
+    }
+
+
+# ==========================================
+# BACKTEST ENGINE
+# ==========================================
+@app.post("/backtest")
+def backtest(data: BacktestRequest):
+
+    df_30m = preprocess(data.values_30m)
+    df_1h = preprocess(data.values_1h)
+
+    wins = 0
+    losses = 0
+    trades = 0
+
+    for i in range(60, len(df_30m) - 10):
+
+        slice_30m = df_30m.iloc[:i]
+        slice_1h = df_1h.iloc[:i // 2]  # approximate alignment
+
+        volatility = detect_volatility(slice_30m)
+        trend = detect_trend(slice_1h)
+
+        if volatility == "LOW":
+            continue
+
+        trade = detect_entry(slice_30m, trend)
+
+        if trade["signal"] == "NO_TRADE":
+            continue
+
+        trades += 1
+
+        entry = trade["entry"]
+        sl = trade["stop_loss"]
+        tp = trade["take_profit"]
+
+        future = df_30m.iloc[i:i+10]
+
+        hit_tp = False
+        hit_sl = False
+
+        for _, candle in future.iterrows():
+            if trade["signal"] == "BUY":
+                if candle["low"] <= sl:
+                    hit_sl = True
+                    break
+                if candle["high"] >= tp:
+                    hit_tp = True
+                    break
+
+            if trade["signal"] == "SELL":
+                if candle["high"] >= sl:
+                    hit_sl = True
+                    break
+                if candle["low"] <= tp:
+                    hit_tp = True
+                    break
+
+        if hit_tp:
+            wins += 1
+        elif hit_sl:
+            losses += 1
+
+    winrate = (wins / trades * 100) if trades > 0 else 0
+
+    return {
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "winrate": round(winrate, 2)
     }
 
 
@@ -132,6 +229,4 @@ def analyze(data: MarketData):
 # ==========================================
 @app.get("/")
 def home():
-    return {
-        "message": "EMA50 Breakout + Volatility API running successfully"
-    }
+    return {"message": "MTF EMA Strategy API Running"}
