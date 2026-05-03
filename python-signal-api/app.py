@@ -1,10 +1,10 @@
+```python
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
-app = FastAPI(title="SMC PRO MTF Engine v2")
+app = FastAPI(title="SMC PRO MTF Engine v3 | TwelveData Ready")
 
 
 # =====================================================
@@ -16,31 +16,48 @@ class BacktestRequest(BaseModel):
 
 
 # =====================================================
-# PREPROCESS
-# Requires candle format:
-# {
-#   "time": "2026-05-03 14:30:00",
-#   "open":1.10,
-#   "high":1.11,
-#   "low":1.09,
-#   "close":1.105,
-#   "volume":1200
-# }
+# PREPROCESS (TWELVEDATA READY)
+# Works with:
+# datetime, open, high, low, close, volume(optional)
 # =====================================================
 def preprocess(data):
     df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    # TwelveData returns newest first -> reverse
     df = df.iloc[::-1].reset_index(drop=True)
 
-    df["time"] = pd.to_datetime(df["time"])
+    # Support datetime/time
+    if "datetime" in df.columns:
+        df["time"] = pd.to_datetime(df["datetime"], errors="coerce")
 
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
+    elif "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+
+    else:
+        raise ValueError("No datetime/time column found")
+
+    # Numeric OHLC
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # TwelveData forex may not have volume
+    if "volume" not in df.columns:
+        df["volume"] = 1000
+
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(1000)
+
+    # Remove bad rows
+    df.dropna(inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
     return df
 
 
 # =====================================================
-# SESSION FILTER USING CANDLE TIME
+# SESSION FILTER
 # =====================================================
 def is_active_session(candle_time):
     hour = candle_time.hour
@@ -52,17 +69,13 @@ def is_active_session(candle_time):
 
 
 # =====================================================
-# NEWS FILTER (AVOID MAJOR NEWS HOURS)
-# Example only. Replace with API later.
+# NEWS FILTER
 # =====================================================
 def is_news_time(candle_time):
     hour = candle_time.hour
 
-    # Example avoid 13:00 / 14:00 UTC
-    if hour in [13, 14]:
-        return True
-
-    return False
+    # avoid high volatility hours
+    return hour in [13, 14]
 
 
 # =====================================================
@@ -76,13 +89,21 @@ def calculate_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = tr.rolling(period).mean()
 
-    return atr.iloc[-1]
+    value = atr.iloc[-1]
+
+    if pd.isna(value):
+        return (df["high"] - df["low"]).tail(14).mean()
+
+    return value
 
 
 # =====================================================
 # TREND 1H
 # =====================================================
 def detect_trend(df):
+    if len(df) < 12:
+        return "RANGE"
+
     last = df.iloc[-1]
 
     prev_high = df["high"].iloc[-10:-1].max()
@@ -101,6 +122,9 @@ def detect_trend(df):
 # LIQUIDITY SWEEP
 # =====================================================
 def detect_liquidity_sweep(df):
+    if len(df) < 25:
+        return None
+
     last = df.iloc[-1]
 
     prev_high = df["high"].iloc[-20:-2].max()
@@ -116,9 +140,12 @@ def detect_liquidity_sweep(df):
 
 
 # =====================================================
-# BOS / CHOCH
+# STRUCTURE
 # =====================================================
 def detect_structure(df):
+    if len(df) < 25:
+        return "RANGE"
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -148,14 +175,11 @@ def detect_fvg(df):
         return None
 
     c1 = df.iloc[-3]
-    c2 = df.iloc[-2]
     c3 = df.iloc[-1]
 
-    # Bullish FVG
     if c1["high"] < c3["low"]:
         return "BULLISH_FVG"
 
-    # Bearish FVG
     if c1["low"] > c3["high"]:
         return "BEARISH_FVG"
 
@@ -166,29 +190,32 @@ def detect_fvg(df):
 # ORDER BLOCK
 # =====================================================
 def detect_order_block(df):
+    if len(df) < 3:
+        return None
+
+    prev = df.iloc[-2]
     last = df.iloc[-1]
 
-    # Bullish OB = last bearish candle before rally
-    prev = df.iloc[-2]
-
     if prev["close"] < prev["open"] and last["close"] > prev["high"]:
-        return "BULLISH_OB", prev["low"], prev["high"]
+        return "BULLISH_OB"
 
-    # Bearish OB
     if prev["close"] > prev["open"] and last["close"] < prev["low"]:
-        return "BEARISH_OB", prev["low"], prev["high"]
+        return "BEARISH_OB"
 
-    return None, None, None
+    return None
 
 
 # =====================================================
-# VOLUME CONFIRMATION
+# VOLUME CONFIRM
 # =====================================================
 def volume_confirm(df):
+    if len(df) < 12:
+        return True
+
     avg = df["volume"].iloc[-10:-1].mean()
     last = df.iloc[-1]["volume"]
 
-    return last > avg * 1.2
+    return last >= avg * 0.8
 
 
 # =====================================================
@@ -198,18 +225,16 @@ def detect_entry(df_30m, trend):
     last = df_30m.iloc[-1]
     candle_time = last["time"]
 
-    # Session filter
     if not is_active_session(candle_time):
         return {"signal": "NO_TRADE", "reason": "NO_SESSION"}
 
-    # News filter
     if is_news_time(candle_time):
         return {"signal": "NO_TRADE", "reason": "NEWS_TIME"}
 
     sweep = detect_liquidity_sweep(df_30m)
     structure = detect_structure(df_30m)
     fvg = detect_fvg(df_30m)
-    ob, ob_low, ob_high = detect_order_block(df_30m)
+    ob = detect_order_block(df_30m)
     vol_ok = volume_confirm(df_30m)
 
     if not vol_ok:
@@ -217,69 +242,82 @@ def detect_entry(df_30m, trend):
 
     atr = calculate_atr(df_30m)
 
-    # =================================================
-    # BUY
-    # =================================================
-    if trend == "BULLISH":
-        if sweep == "SWEEP_LOW":
-            if structure in ["CHOCH_UP", "BOS_UP"]:
-                if fvg == "BULLISH_FVG":
-                    if ob == "BULLISH_OB":
+    # ========================= BUY =========================
+    if (
+        trend == "BULLISH"
+        and sweep == "SWEEP_LOW"
+        and structure in ["CHOCH_UP", "BOS_UP"]
+        and fvg == "BULLISH_FVG"
+        and ob == "BULLISH_OB"
+    ):
+        entry = last["close"]
+        sl = entry - atr * 1.5
+        tp = entry + atr * 3
 
-                        entry = last["close"]
-                        sl = entry - atr * 1.5
-                        tp = entry + atr * 3
+        return {
+            "signal": "BUY",
+            "entry": round(entry, 5),
+            "stop_loss": round(sl, 5),
+            "take_profit": round(tp, 5),
+            "trend": trend,
+            "structure": structure,
+            "atr": round(atr, 5)
+        }
 
-                        return {
-                            "signal": "BUY",
-                            "entry": round(entry, 5),
-                            "stop_loss": round(sl, 5),
-                            "take_profit": round(tp, 5),
-                            "atr": round(atr, 5)
-                        }
+    # ========================= SELL =========================
+    if (
+        trend == "BEARISH"
+        and sweep == "SWEEP_HIGH"
+        and structure in ["CHOCH_DOWN", "BOS_DOWN"]
+        and fvg == "BEARISH_FVG"
+        and ob == "BEARISH_OB"
+    ):
+        entry = last["close"]
+        sl = entry + atr * 1.5
+        tp = entry - atr * 3
 
-    # =================================================
-    # SELL
-    # =================================================
-    if trend == "BEARISH":
-        if sweep == "SWEEP_HIGH":
-            if structure in ["CHOCH_DOWN", "BOS_DOWN"]:
-                if fvg == "BEARISH_FVG":
-                    if ob == "BEARISH_OB":
+        return {
+            "signal": "SELL",
+            "entry": round(entry, 5),
+            "stop_loss": round(sl, 5),
+            "take_profit": round(tp, 5),
+            "trend": trend,
+            "structure": structure,
+            "atr": round(atr, 5)
+        }
 
-                        entry = last["close"]
-                        sl = entry + atr * 1.5
-                        tp = entry - atr * 3
-
-                        return {
-                            "signal": "SELL",
-                            "entry": round(entry, 5),
-                            "stop_loss": round(sl, 5),
-                            "take_profit": round(tp, 5),
-                            "atr": round(atr, 5)
-                        }
-
-    return {"signal": "NO_TRADE"}
+    return {
+        "signal": "NO_TRADE",
+        "trend": trend,
+        "structure": structure
+    }
 
 
 # =====================================================
-# LIVE ANALYSIS
+# MAIN ANALYZE
 # =====================================================
 @app.post("/analyze")
 def analyze(data: BacktestRequest):
-    df30 = preprocess(data.values_30m)
-    df1h = preprocess(data.values_1h)
+    try:
+        df30 = preprocess(data.values_30m)
+        df1h = preprocess(data.values_1h)
 
-    if len(df30) < 50 or len(df1h) < 30:
-        return {"error": "Not enough data"}
+        if len(df30) < 50 or len(df1h) < 20:
+            return {
+                "signal": "NO_TRADE",
+                "reason": "NOT_ENOUGH_DATA"
+            }
 
-    trend = detect_trend(df1h)
-    trade = detect_entry(df30, trend)
+        trend = detect_trend(df1h)
+        result = detect_entry(df30, trend)
 
-    return {
-        "trend": trend,
-        **trade
-    }
+        return result
+
+    except Exception as e:
+        return {
+            "signal": "NO_TRADE",
+            "reason": str(e)
+        }
 
 
 # =====================================================
@@ -288,5 +326,6 @@ def analyze(data: BacktestRequest):
 @app.get("/")
 def home():
     return {
-        "message": "SMC PRO Engine v2 Running | OB + FVG + ATR + Volume + Session + News"
+        "message": "SMC PRO MTF Engine v3 Running | TwelveData Compatible"
     }
+```
