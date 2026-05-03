@@ -6,7 +6,7 @@ import { marketSignalEmailTemplate } from "../utils/sendAlertEmail.js";
 // CONFIG
 // ==========================================
 const API_KEY = process.env.TWELVE_DATA_API_KEY;
-const PYTHON_API_URL = "https://suing-s27n.onrender.com/analyze-mtf";
+const PYTHON_API_URL = "https://suing-s27n.onrender.com/analyze";
 
 // Prevent duplicate alerts
 const lastSignals = new Map();
