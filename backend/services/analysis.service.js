@@ -143,11 +143,9 @@ export const autoAnalyzeMarket = async () => {
       "USD/JPY",
       "USD/CHF",
       "USD/CAD",
-      "AUD/USD",
       "NZD/USD",
       "GBP/JPY",
-      "EUR/GBP",
-      "XAU/USD"
+      "EUR/GBP"
     ];
 
     for (const symbol of pairs) {
