@@ -2,157 +2,124 @@ import axios from "axios";
 import { sendAlertEmail } from "../config/mail.config.js";
 import { marketSignalEmailTemplate } from "../utils/sendAlertEmail.js";
 
-// ==========================================
-// CONFIG
-// ==========================================
-const API_KEY = process.env.TWELVE_DATA_API_KEY;
-const PYTHON_API_URL = "https://suing-s27n.onrender.com/analyze";
-
-// Prevent duplicate alerts
-const lastSignals = new Map();
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// ==========================================
-// FETCH MARKET DATA (30m + 1H)
-// ==========================================
-const fetchMarketData = async (symbol) => {
-  const url30m = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=30min&outputsize=200&apikey=${API_KEY}`;
-  const url1h = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=1h&outputsize=200&apikey=${API_KEY}`;
-
-  const [res30m, res1h] = await Promise.all([
-    axios.get(url30m),
-    axios.get(url1h),
-  ]);
-
-  if (res30m.data.status === "error") {
-    throw new Error(res30m.data.message);
-  }
-
-  if (res1h.data.status === "error") {
-    throw new Error(res1h.data.message);
-  }
-
-  return {
-    values_30m: res30m.data.values,
-    values_1h: res1h.data.values,
-  };
-};
-
-// ==========================================
-// CALL FASTAPI
-// ==========================================
-const runPythonAnalysis = async (values_30m, values_1h) => {
-  const payload = { values_30m, values_1h };
-
-  const response = await axios.post(PYTHON_API_URL, payload);
-  return response.data;
-};
-
-// ==========================================
-// HANDLE SIGNAL
-// ==========================================
-const handleSignal = async (symbol, result) => {
-  const {
-    signal,
-    entry,
-    stop_loss,
-    take_profit,
-    trend,
-    volatility,
-    structure,
-  } = result;
-
-  // No signal
-  if (!["BUY", "SELL"].includes(signal)) {
-    console.log(
-      `${symbol} → No trade | Trend: ${trend} | Volatility: ${volatility}`
-    );
-    return;
-  }
-
-  // Prevent duplicate alerts
-  const key = `${symbol}_${signal}`;
-  if (lastSignals.get(symbol) === key) {
-    console.log(`Duplicate skipped → ${symbol}`);
-    return;
-  }
-
-  lastSignals.set(symbol, key);
-
-  // TradingView link
-  const chartLink = `https://www.tradingview.com/chart/?symbol=${symbol.replace(
-    "/",
-    ""
-  )}`;
-
-  // Email template
-  const emailHTML = marketSignalEmailTemplate(
-    symbol,
-    signal,
-    structure,
-    "30min (Entry) / 1H (Trend)",
-    entry,
-    stop_loss,
-    take_profit,
-    chartLink
-  );
-
-  await sendAlertEmail(`${symbol} ${signal} Signal`, emailHTML);
-
-  console.log(
-    `${symbol} ${signal} | Entry: ${entry} | SL: ${stop_loss} | TP: ${take_profit}`
-  );
-};
-
-// ==========================================
-// MAIN ANALYSIS FUNCTION
-// ==========================================
-export const performAnalysis = async (symbol) => {
+// Perform analysis for a given symbol and timeframe
+export const performAnalysis = async (symbol, timeframe) => {
   try {
-    console.log(`Analyzing ${symbol}...`);
+    const apiKey = process.env.TWELVE_DATA_API_KEY;
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${timeframe}&outputsize=200&apikey=${apiKey}`;
+    
+    // Fetch market data
+    const response = await axios.get(url);
+    if (response.data.status === "error") throw new Error(response.data.message);
 
-    const { values_30m, values_1h } = await fetchMarketData(symbol);
+    const marketData = response.data.values;
 
-    const result = await runPythonAnalysis(values_30m, values_1h);
+    // Run Python analysis via FastAPI
+    const result = await runPythonAnalysis(marketData, symbol, timeframe);
 
-    await handleSignal(symbol, result);
+    // Only send email if full signal exists
+    if (["BUY", "SELL"].includes(result.signal)) {
+      // Get current timestamp
+      const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      
+      // Generate email HTML with all required parameters
+      const emailHTML = marketSignalEmailTemplate(
+        result.symbol,                    // symbol
+        result.signal,                    // signal
+        result.timeframe,                 // timeframe
+        result.entry,                     // lastClose (entry price)
+        result.stop_loss,                 // stopLoss
+        result.take_profit,               // takeProfit
+        timestamp,                        // timestamp
+        result.setup_type || "Breakout + Pullback", // setupType
+        result.key_level || "N/A",        // keyLevel
+        result.ema50 || "N/A"            // ema50
+      );
+
+      await sendAlertEmail(
+        `🚨 ${result.symbol} ${result.signal} Signal Alert - ${result.setup_type || "Breakout + Pullback"}`,
+        emailHTML
+      );
+
+      console.log(
+        `✅ Signal sent: ${result.symbol} ${result.signal} (${result.setup_type || "Breakout + Pullback"})`
+      );
+    } else {
+      console.log(
+        `⏸️ No valid signal for ${symbol} (${timeframe}). Info: ${result.info || "No setup detected"}`
+      );
+    }
 
     return result;
-  } catch (error) {
-    console.error(`Error for ${symbol}:`, error.message);
+  } catch (err) {
+    console.error("❌ Analysis failed:", err.message);
+    throw err;
   }
 };
 
-// ==========================================
-// AUTO MARKET LOOP
-// ==========================================
-let isRunning = false;
-
-export const autoAnalyzeMarket = async () => {
-  if (isRunning) {
-    console.log("Previous scan still running. Skipping...");
-    return;
-  }
-
-  isRunning = true;
+// Run analysis via FastAPI API
+const runPythonAnalysis = async (marketData, symbol, timeframe) => {
+  //const url = "https://five0ema-1-7wri.onrender.com/analyze";
+  const url = "https://suing-s27n.onrender.com/analyze";
+  const payload = { values: marketData, symbol, timeframe };
 
   try {
-    const pairs = [
-      "EUR/USD",
-      "GBP/USD",
-      "USD/JPY",
-      "USD/CHF",
-      "USD/CAD",
-      "NZD/USD",
-      "GBP/JPY",
-      "EUR/GBP"
-    ];
+    const response = await axios.post(url, payload);
+    return response.data;
+  } catch (error) {
+    console.error("❌ FastAPI request failed:", error.message);
+    throw new Error("Failed to analyze market data via Python API");
+  }
+};
 
-    for (const symbol of pairs) {
-      await performAnalysis(symbol);
-      await sleep(15000);
+// Auto-analysis scheduler
+export const autoAnalyzeMarket = async () => {
+  // Timeframes optimized for pullback strategy
+  const pairs = [
+    { symbol: "EUR/USD", timeframe: "1h" },
+    { symbol: "GBP/USD", timeframe: "1h" },
+    { symbol: "USD/JPY", timeframe: "1h" },
+    { symbol: "USD/CHF", timeframe: "1h" },
+    { symbol: "NZD/USD", timeframe: "1h" },
+    { symbol: "USD/CAD", timeframe: "1h" },
+    { symbol: "AUD/USD", timeframe: "1h" },
+    { symbol: "EUR/GBP", timeframe: "1h" },
+    { symbol: "GBP/JPY", timeframe: "1h" },
+    { symbol: "EUR/JPY", timeframe: "1h" },
+    { symbol: "AUD/JPY", timeframe: "1h" },
+    { symbol: "NZD/JPY", timeframe: "1h" },
+  ];
+  
+  console.log(`🚀 Starting auto-analysis for ${pairs.length} pairs...`);
+  console.log(`⏰ Time: ${new Date().toISOString()}`);
+  
+  for (const pair of pairs) {
+    console.log(`\n📊 Analyzing ${pair.symbol} (${pair.timeframe})...`);
+    try {
+      await performAnalysis(pair.symbol, pair.timeframe);
+    } catch (error) {
+      console.error(`❌ Failed to analyze ${pair.symbol}:`, error.message);
     }
-  } finally {
-    isRunning = false;
+  }
+  
+  console.log(`\n✅ Auto-analysis complete for all pairs`);
+};
+
+// Function to get only signals (without sending email)
+export const getSignalsOnly = async (symbol, timeframe) => {
+  try {
+    const apiKey = process.env.TWELVE_DATA_API_KEY;
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${timeframe}&outputsize=200&apikey=${apiKey}`;
+    
+    const response = await axios.get(url);
+    if (response.data.status === "error") throw new Error(response.data.message);
+
+    const marketData = response.data.values;
+    const result = await runPythonAnalysis(marketData, symbol, timeframe);
+    
+    return result;
+  } catch (err) {
+    console.error("❌ Analysis failed:", err.message);
+    throw err;
   }
 };
