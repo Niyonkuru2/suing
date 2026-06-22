@@ -1,332 +1,238 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
+from ta.trend import EMAIndicator
 import numpy as np
 
-app = FastAPI(title="SMC PRO MTF Engine v3 | TwelveData Ready")
+app = FastAPI(title="EMA50 Breakout + Pullback Strategy API")
+
+
+class MarketData(BaseModel):
+    values: list
+    symbol: str
+    timeframe: str
+
+
+def detect_breakout_setup(df):
+    """
+    Detects your specific setup:
+    BUY: Price under EMA50 → breaks above EMA50 → makes a high → pulls back → closes above that high
+    SELL: Price above EMA50 → breaks below EMA50 → makes a low → pulls back → closes below that low
+    """
+    
+    # Get last 30 candles for analysis
+    if len(df) < 30:
+        return None, None, None
+    
+    # We need to check the recent history
+    recent_df = df.iloc[-30:].copy()
+    
+    # Find where price crossed EMA50
+    recent_df['above_ema'] = recent_df['close'] > recent_df['ema50']
+    recent_df['below_ema'] = recent_df['close'] < recent_df['ema50']
+    recent_df['ema_cross_up'] = (recent_df['above_ema'] & recent_df['below_ema'].shift(1))
+    recent_df['ema_cross_down'] = (recent_df['below_ema'] & recent_df['above_ema'].shift(1))
+    
+    # Get latest candle
+    latest = df.iloc[-1]
+    
+    # Check if we have any recent crosses
+    if not recent_df['ema_cross_up'].any() and not recent_df['ema_cross_down'].any():
+        return None, None, None
+    
+    # =========================
+    # BUY SETUP DETECTION
+    # =========================
+    # Find the most recent EMA cross up
+    cross_up_indices = recent_df[recent_df['ema_cross_up']].index
+    if len(cross_up_indices) > 0:
+        last_cross_up_idx = cross_up_indices[-1]
+        
+        # Check if price was under EMA50 before cross
+        if last_cross_up_idx > 0 and recent_df.loc[last_cross_up_idx - 1, 'close'] < recent_df.loc[last_cross_up_idx - 1, 'ema50']:
+            
+            # Look for a high made after the cross
+            candles_after_cross = recent_df.loc[last_cross_up_idx:].copy()
+            
+            if len(candles_after_cross) >= 3:
+                # Find the highest high after cross
+                high_after_cross = candles_after_cross['high'].max()
+                high_idx_after_cross = candles_after_cross['high'].idxmax()
+                
+                # Check if current price pulled back and closed above that high
+                if high_idx_after_cross < len(df) - 1:  # Make sure we have candles after the high
+                    # Find candles after the high
+                    candles_after_high = df.loc[high_idx_after_cross + 1:].copy()
+                    
+                    if len(candles_after_high) > 0:
+                        # Check if price pulled back below the high
+                        if any(candles_after_high['close'] < df.loc[high_idx_after_cross, 'high']):
+                            # Check if current close is above that high
+                            if latest['close'] > df.loc[high_idx_after_cross, 'high']:
+                                return "BUY_TREND", df.loc[high_idx_after_cross, 'high'], high_idx_after_cross
+    
+    # =========================
+    # SELL SETUP DETECTION
+    # =========================
+    # Find the most recent EMA cross down
+    cross_down_indices = recent_df[recent_df['ema_cross_down']].index
+    if len(cross_down_indices) > 0:
+        last_cross_down_idx = cross_down_indices[-1]
+        
+        # Check if price was above EMA50 before cross
+        if last_cross_down_idx > 0 and recent_df.loc[last_cross_down_idx - 1, 'close'] > recent_df.loc[last_cross_down_idx - 1, 'ema50']:
+            
+            # Look for a low made after the cross
+            candles_after_cross = recent_df.loc[last_cross_down_idx:].copy()
+            
+            if len(candles_after_cross) >= 3:
+                # Find the lowest low after cross
+                low_after_cross = candles_after_cross['low'].min()
+                low_idx_after_cross = candles_after_cross['low'].idxmin()
+                
+                # Check if current price pulled back and closed below that low
+                if low_idx_after_cross < len(df) - 1:  # Make sure we have candles after the low
+                    # Find candles after the low
+                    candles_after_low = df.loc[low_idx_after_cross + 1:].copy()
+                    
+                    if len(candles_after_low) > 0:
+                        # Check if price pulled back above the low
+                        if any(candles_after_low['close'] > df.loc[low_idx_after_cross, 'low']):
+                            # Check if current close is below that low
+                            if latest['close'] < df.loc[low_idx_after_cross, 'low']:
+                                return "SELL_TREND", df.loc[low_idx_after_cross, 'low'], low_idx_after_cross
+    
+    return None, None, None
 
 
-# =====================================================
-# REQUEST MODEL
-# =====================================================
-class BacktestRequest(BaseModel):
-    values_30m: list
-    values_1h: list
-
-
-# =====================================================
-# PREPROCESS (TWELVEDATA READY)
-# =====================================================
-def preprocess(data):
-    df = pd.DataFrame(data)
-
-    if df.empty:
-        return df
-
-    # TwelveData returns newest first
-    df = df.iloc[::-1].reset_index(drop=True)
-
-    # Detect time column
-    if "datetime" in df.columns:
-        df["time"] = pd.to_datetime(df["datetime"], errors="coerce")
-    elif "time" in df.columns:
-        df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    else:
-        raise ValueError("No datetime/time column found")
-
-    # Convert numeric columns
-    for col in ["open", "high", "low", "close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Forex pairs often no volume
-    if "volume" not in df.columns:
-        df["volume"] = 1000
-
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(1000)
-
-    # Remove invalid rows
-    df.dropna(inplace=True)
-    df.reset_index(drop=True, inplace=True)
-
-    return df
-
-
-# =====================================================
-# SESSION FILTER
-# =====================================================
-def is_active_session(candle_time):
-    hour = candle_time.hour
-
-    london = 7 <= hour <= 16
-    newyork = 12 <= hour <= 21
-
-    return london or newyork
-
-
-# =====================================================
-# NEWS FILTER
-# =====================================================
-def is_news_time(candle_time):
-    hour = candle_time.hour
-    return hour in [13, 14]
-
-
-# =====================================================
-# ATR
-# =====================================================
-def calculate_atr(df, period=14):
-    high_low = df["high"] - df["low"]
-    high_close = abs(df["high"] - df["close"].shift())
-    low_close = abs(df["low"] - df["close"].shift())
-
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
-
-    value = atr.iloc[-1]
-
-    if pd.isna(value):
-        return (df["high"] - df["low"]).tail(14).mean()
-
-    return value
-
-
-# =====================================================
-# TREND 1H
-# =====================================================
-def detect_trend(df):
-    if len(df) < 12:
-        return "RANGE"
-
-    last = df.iloc[-1]
-
-    prev_high = df["high"].iloc[-10:-1].max()
-    prev_low = df["low"].iloc[-10:-1].min()
-
-    if last["close"] > prev_high:
-        return "BULLISH"
-
-    if last["close"] < prev_low:
-        return "BEARISH"
-
-    return "RANGE"
-
-
-# =====================================================
-# LIQUIDITY SWEEP
-# =====================================================
-def detect_liquidity_sweep(df):
-    if len(df) < 25:
-        return None
-
-    last = df.iloc[-1]
-
-    prev_high = df["high"].iloc[-20:-2].max()
-    prev_low = df["low"].iloc[-20:-2].min()
-
-    if last["high"] > prev_high and last["close"] < prev_high:
-        return "SWEEP_HIGH"
-
-    if last["low"] < prev_low and last["close"] > prev_low:
-        return "SWEEP_LOW"
-
-    return None
-
-
-# =====================================================
-# STRUCTURE
-# =====================================================
-def detect_structure(df):
-    if len(df) < 25:
-        return "RANGE"
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    prev_high = df["high"].iloc[-20:-2].max()
-    prev_low = df["low"].iloc[-20:-2].min()
-
-    if last["close"] > prev_high:
-        return "BOS_UP"
-
-    if last["close"] < prev_low:
-        return "BOS_DOWN"
-
-    if prev["close"] < prev_low and last["close"] > prev_low:
-        return "CHOCH_UP"
-
-    if prev["close"] > prev_high and last["close"] < prev_high:
-        return "CHOCH_DOWN"
-
-    return "RANGE"
-
-
-# =====================================================
-# FAIR VALUE GAP
-# =====================================================
-def detect_fvg(df):
-    if len(df) < 3:
-        return None
-
-    c1 = df.iloc[-3]
-    c3 = df.iloc[-1]
-
-    if c1["high"] < c3["low"]:
-        return "BULLISH_FVG"
-
-    if c1["low"] > c3["high"]:
-        return "BEARISH_FVG"
-
-    return None
-
-
-# =====================================================
-# ORDER BLOCK
-# =====================================================
-def detect_order_block(df):
-    if len(df) < 3:
-        return None
-
-    prev = df.iloc[-2]
-    last = df.iloc[-1]
-
-    if prev["close"] < prev["open"] and last["close"] > prev["high"]:
-        return "BULLISH_OB"
-
-    if prev["close"] > prev["open"] and last["close"] < prev["low"]:
-        return "BEARISH_OB"
-
-    return None
-
-
-# =====================================================
-# VOLUME CONFIRM
-# =====================================================
-def volume_confirm(df):
-    if len(df) < 12:
-        return True
-
-    avg = df["volume"].iloc[-10:-1].mean()
-    last = df.iloc[-1]["volume"]
-
-    return last >= avg * 0.8
-
-
-# =====================================================
-# ENTRY ENGINE
-# =====================================================
-def detect_entry(df_30m, trend):
-    last = df_30m.iloc[-1]
-    candle_time = last["time"]
-
-    if not is_active_session(candle_time):
-        return {
-            "signal": "NO_TRADE",
-            "reason": "NO_SESSION",
-            "trend": trend
-        }
-
-    if is_news_time(candle_time):
-        return {
-            "signal": "NO_TRADE",
-            "reason": "NEWS_TIME",
-            "trend": trend
-        }
-
-    sweep = detect_liquidity_sweep(df_30m)
-    structure = detect_structure(df_30m)
-    fvg = detect_fvg(df_30m)
-    ob = detect_order_block(df_30m)
-    vol_ok = volume_confirm(df_30m)
-
-    if not vol_ok:
-        return {
-            "signal": "NO_TRADE",
-            "reason": "LOW_VOLUME",
-            "trend": trend,
-            "structure": structure
-        }
-
-    atr = calculate_atr(df_30m)
-
-    # BUY
-    if (
-        trend == "BULLISH"
-        and sweep == "SWEEP_LOW"
-        and structure in ["CHOCH_UP", "BOS_UP"]
-        and fvg == "BULLISH_FVG"
-        and ob == "BULLISH_OB"
-    ):
-        entry = last["close"]
-
-        return {
-            "signal": "BUY",
-            "entry": round(entry, 5),
-            "stop_loss": round(entry - atr * 1.5, 5),
-            "take_profit": round(entry + atr * 3, 5),
-            "trend": trend,
-            "structure": structure,
-            "atr": round(atr, 5)
-        }
-
-    # SELL
-    if (
-        trend == "BEARISH"
-        and sweep == "SWEEP_HIGH"
-        and structure in ["CHOCH_DOWN", "BOS_DOWN"]
-        and fvg == "BEARISH_FVG"
-        and ob == "BEARISH_OB"
-    ):
-        entry = last["close"]
-
-        return {
-            "signal": "SELL",
-            "entry": round(entry, 5),
-            "stop_loss": round(entry + atr * 1.5, 5),
-            "take_profit": round(entry - atr * 3, 5),
-            "trend": trend,
-            "structure": structure,
-            "atr": round(atr, 5)
-        }
-
-    return {
-        "signal": "NO_TRADE",
-        "trend": trend,
-        "structure": structure
-    }
-
-
-# =====================================================
-# MAIN ANALYZE
-# =====================================================
 @app.post("/analyze")
-def analyze(data: BacktestRequest):
-    try:
-        df30 = preprocess(data.values_30m)
-        df1h = preprocess(data.values_1h)
-
-        if len(df30) < 50 or len(df1h) < 20:
-            return {
-                "signal": "NO_TRADE",
-                "reason": "NOT_ENOUGH_DATA"
-            }
-
-        trend = detect_trend(df1h)
-        result = detect_entry(df30, trend)
-
-        return result
-
-    except Exception as e:
+def analyze(data: MarketData):
+    df = pd.DataFrame(data.values)
+    
+    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+        return {"error": "Missing OHLC data"}
+    
+    if len(df) < 60:
+        return {"error": "Not enough data"}
+    
+    # Latest candle at bottom
+    df = df.iloc[::-1].reset_index(drop=True)
+    
+    # Convert to float
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
+    
+    # =========================
+    # EMA 50
+    # =========================
+    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
+    
+    latest = df.iloc[-1]
+    
+    # =========================
+    # DETECT YOUR SETUP
+    # =========================
+    signal, key_level, key_idx = detect_breakout_setup(df)
+    
+    stop_loss = None
+    take_profit = None
+    structure_type = "NO_CLEAR_SETUP"
+    
+    # =========================
+    # BUY CONDITIONS
+    # =========================
+    if signal == "BUY_TREND":
+        structure_type = "BREAKOUT_PULLBACK_BUY"
+        
+        # SL below the pullback low (the swing low after the breakout)
+        # Check candles after the breakout high
+        candles_after_breakout = df.loc[key_idx + 1:].copy()
+        if len(candles_after_breakout) > 0:
+            # Find the lowest low during pullback
+            pullback_low = candles_after_breakout['low'].min()
+            stop_loss = pullback_low  # SL below pullback low
+        else:
+            stop_loss = latest['close'] - (latest['close'] * 0.01)  # Default 1% stop
+        
+        # 1:2 Risk Reward
+        risk = latest['close'] - stop_loss
+        take_profit = latest['close'] + (risk * 2)
+        
         return {
+            "symbol": data.symbol,
+            "timeframe": data.timeframe,
+            "setup_type": structure_type,
+            "signal": signal,
+            "entry": round(latest['close'], 5),
+            "key_level": round(key_level, 5) if key_level else None,
+            "ema50": round(latest['ema50'], 5),
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
+            "risk_reward": "1:2"
+        }
+    
+    # =========================
+    # SELL CONDITIONS
+    # =========================
+    elif signal == "SELL_TREND":
+        structure_type = "BREAKOUT_PULLBACK_SELL"
+        
+        # SL above the pullback high (the swing high after the breakdown)
+        candles_after_breakdown = df.loc[key_idx + 1:].copy()
+        if len(candles_after_breakdown) > 0:
+            # Find the highest high during pullback
+            pullback_high = candles_after_breakdown['high'].max()
+            stop_loss = pullback_high  # SL above pullback high
+        else:
+            stop_loss = latest['close'] + (latest['close'] * 0.01)  # Default 1% stop
+        
+        # 1:2 Risk Reward
+        risk = stop_loss - latest['close']
+        take_profit = latest['close'] - (risk * 2)
+        
+        return {
+            "symbol": data.symbol,
+            "timeframe": data.timeframe,
+            "setup_type": structure_type,
+            "signal": signal,
+            "entry": round(latest['close'], 5),
+            "key_level": round(key_level, 5) if key_level else None,
+            "ema50": round(latest['ema50'], 5),
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
+            "risk_reward": "1:2"
+        }
+    
+    # =========================
+    # NO SIGNAL
+    # =========================
+    else:
+        # Check if we have any recent crosses for informational purposes
+        recent_df = df.iloc[-30:].copy()
+        recent_df['above_ema'] = recent_df['close'] > recent_df['ema50']
+        recent_df['below_ema'] = recent_df['close'] < recent_df['ema50']
+        recent_df['ema_cross_up'] = (recent_df['above_ema'] & recent_df['below_ema'].shift(1))
+        recent_df['ema_cross_down'] = (recent_df['below_ema'] & recent_df['above_ema'].shift(1))
+        
+        info = "No setup detected. "
+        if recent_df['ema_cross_up'].any():
+            info += "EMA cross up detected but no pullback and close above high yet. "
+        if recent_df['ema_cross_down'].any():
+            info += "EMA cross down detected but no pullback and close below low yet. "
+        
+        return {
+            "symbol": data.symbol,
+            "timeframe": data.timeframe,
+            "setup_type": "NO_SETUP",
             "signal": "NO_TRADE",
-            "reason": str(e)
+            "info": info,
+            "entry": round(latest['close'], 5),
+            "ema50": round(latest['ema50'], 5),
+            "stop_loss": None,
+            "take_profit": None
         }
 
 
-# =====================================================
-# ROOT
-# =====================================================
 @app.get("/")
 def home():
-    return {
-        "message": "SMC PRO MTF Engine v3 Running | TwelveData Compatible"
-    }
+    return {"message": "EMA50 Breakout + Pullback Strategy API running successfully"}
