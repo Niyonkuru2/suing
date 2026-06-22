@@ -1,203 +1,176 @@
 export const marketSignalEmailTemplate = (
   symbol,
   signal,
-  probability,
   timeframe,
-  price,
-  ema50,
-  volatility
-) => {
-  const isBuy = signal === "BUY";
-
-  const mainColor = isBuy ? "#16a34a" : "#dc2626";
-  const softColor = isBuy ? "#dcfce7" : "#fee2e2";
-  const signalText = isBuy ? "Bullish Setup" : "Bearish Setup";
-
-  return `
+  lastClose,
+  stopLoss,
+  takeProfit,
+  timestamp,
+  setupType,
+  keyLevel,
+  ema50
+) => `
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Trading Alert</title>
-
-<style>
-body{
-  margin:0;
-  padding:0;
-  background:#f3f4f6;
-  font-family:Arial, Helvetica, sans-serif;
-}
-
-.wrapper{
-  max-width:640px;
-  margin:30px auto;
-  background:#ffffff;
-  border-radius:14px;
-  overflow:hidden;
-  box-shadow:0 8px 24px rgba(0,0,0,0.08);
-}
-
-.header{
-  background:${mainColor};
-  color:#ffffff;
-  text-align:center;
-  padding:28px 20px;
-}
-
-.header h1{
-  margin:0;
-  font-size:28px;
-  letter-spacing:1px;
-}
-
-.header p{
-  margin-top:8px;
-  opacity:0.95;
-  font-size:15px;
-}
-
-.content{
-  padding:32px;
-  color:#111827;
-}
-
-.badge{
-  display:inline-block;
-  padding:8px 18px;
-  border-radius:999px;
-  background:${mainColor};
-  color:#fff;
-  font-weight:bold;
-  font-size:14px;
-}
-
-.card{
-  margin-top:24px;
-  border:1px solid #e5e7eb;
-  border-radius:12px;
-  overflow:hidden;
-}
-
-.row{
-  display:flex;
-  justify-content:space-between;
-  padding:14px 18px;
-  border-bottom:1px solid #f1f5f9;
-  font-size:15px;
-}
-
-.row:last-child{
-  border-bottom:none;
-}
-
-.label{
-  color:#6b7280;
-}
-
-.value{
-  font-weight:700;
-  color:#111827;
-}
-
-.score{
-  margin-top:22px;
-  background:${softColor};
-  border-left:5px solid ${mainColor};
-  padding:18px;
-  border-radius:10px;
-}
-
-.score h3{
-  margin:0 0 10px;
-  font-size:18px;
-}
-
-.note{
-  margin-top:22px;
-  background:#f9fafb;
-  padding:18px;
-  border-radius:10px;
-  font-size:14px;
-  line-height:1.7;
-  color:#374151;
-}
-
-.footer{
-  text-align:center;
-  padding:20px;
-  background:#f9fafb;
-  color:#6b7280;
-  font-size:13px;
-  border-top:1px solid #e5e7eb;
-}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Market Signal Alert - ${signal}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background-color: #f4f4f7;
+    }
+    .container {
+      max-width: 640px;
+      margin: 40px auto;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+    }
+    .header {
+      background: ${signal === "BUY" ? "#28a745" : "#dc3545"};
+      color: #ffffff;
+      text-align: center;
+      padding: 25px 20px;
+      font-size: 26px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+    .content {
+      padding: 30px 40px;
+      color: #111827;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+    .highlight {
+      background-color: #f3f4f6;
+      border-radius: 8px;
+      padding: 15px 20px;
+      margin-top: 15px;
+      font-size: 15px;
+    }
+    .signal-tag {
+      display: inline-block;
+      padding: 8px 18px;
+      border-radius: 6px;
+      color: #ffffff;
+      font-weight: bold;
+      background-color: ${signal === "BUY" ? "#28a745" : "#dc3545"};
+      text-transform: uppercase;
+    }
+    .setup-tag {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 4px;
+      background-color: #6c757d;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-left: 8px;
+    }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+    .table th, .table td {
+      text-align: left;
+      padding: 8px 0;
+    }
+    .table th {
+      color: #6b7280;
+      font-weight: 600;
+      width: 40%;
+    }
+    .table tr {
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .table tr:last-child {
+      border-bottom: none;
+    }
+    .strategy-box {
+      background-color: #fff3cd;
+      border-left: 4px solid #ffc107;
+      padding: 12px 16px;
+      margin: 20px 0;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .strategy-box strong {
+      color: #856404;
+    }
+    .footer {
+      text-align: center;
+      font-size: 13px;
+      color: #6b7280;
+      padding: 20px;
+      background-color: #f9fafb;
+      border-top: 1px solid #e5e7eb;
+    }
+    .risk-reward-badge {
+      display: inline-block;
+      background-color: #28a745;
+      color: white;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+  </style>
 </head>
-
 <body>
-<div class="wrapper">
-
-  <div class="header">
-    <h1>${signal} ALERT</h1>
-    <p>${signalText} detected by Smart Scanner</p>
-  </div>
-
-  <div class="content">
-
-    <span class="badge">${signal}</span>
-
-    <div class="card">
-      <div class="row">
-        <span class="label">Symbol</span>
-        <span class="value">${symbol}</span>
-      </div>
-
-      <div class="row">
-        <span class="label">Timeframe</span>
-        <span class="value">${timeframe}</span>
-      </div>
-
-      <div class="row">
-        <span class="label">Current Price</span>
-        <span class="value">${price}</span>
-      </div>
-
-      <div class="row">
-        <span class="label">EMA 50</span>
-        <span class="value">${ema50}</span>
-      </div>
-
-      <div class="row">
-        <span class="label">Volatility</span>
-        <span class="value">${volatility}</span>
-      </div>
+  <div class="container">
+    <div class="header">
+      ${signal} SIGNAL ALERT
+      <span class="setup-tag">Breakout + Pullback</span>
     </div>
+    <div class="content">
+      <p>Dear Trader,</p>
+      <p>A new <strong>${signal}</strong> signal has been detected by our automated system for:</p>
+      
+      <div class="highlight">
+        <p><strong>Symbol:</strong> ${symbol}</p>
+        <p><strong>Timeframe:</strong> ${timeframe}</p>
+        <p><strong>Signal:</strong> <span class="signal-tag">${signal}</span></p>
+        <p><strong>Setup Type:</strong> ${setupType || "Breakout + Pullback"}</p>
+        <p><strong>Timestamp:</strong> ${timestamp}</p>
+      </div>
 
-    <div class="score">
-      <h3>Probability Score: ${probability}</h3>
-      <p>
-        Setup aligned with higher timeframe trend and lower timeframe trigger.
+      <div class="strategy-box">
+        <strong>📊 Strategy Entry Conditions:</strong><br/>
+        ${signal === "BUY" ? 
+          `✅ Price was below EMA50 → broke above → made a high → pulled back → closed above that high` :
+          `✅ Price was above EMA50 → broke below → made a low → pulled back → closed below that low`
+        }
+      </div>
+
+      <table class="table">
+        <tr><th>Entry Price:</th><td><strong>${lastClose}</strong></td></tr>
+        <tr><th>Key Breakout Level:</th><td>${keyLevel || "N/A"}</td></tr>
+        <tr><th>EMA50:</th><td>${ema50 || "N/A"}</td></tr>
+        <tr><th>Stop Loss:</th><td><strong style="color: ${signal === "BUY" ? "#dc3545" : "#28a745"}">${stopLoss}</strong></td></tr>
+        <tr><th>Take Profit:</th><td><strong style="color: ${signal === "BUY" ? "#28a745" : "#dc3545"}">${takeProfit}</strong></td></tr>
+        <tr><th>Risk:Reward:</th><td><span class="risk-reward-badge">1 : 2</span></td></tr>
+      </table>
+
+      <p style="margin-top: 20px; font-size: 14px; color: #6b7280;">
+        ⚠️ Please analyze this signal with your strategy before executing any trade.
+        <br/>
+        🎯 Recommended: Wait for confirmation before entry.
       </p>
     </div>
-
-    <div class="note">
-      <strong>Execution Checklist:</strong><br/>
-      ✓ Confirm candle close<br/>
-      ✓ Avoid entering before breakout confirmation<br/>
-      ✓ Respect stop loss<br/>
-      ✓ Risk only 1%–2% per trade<br/>
-      ✓ Check major news events before entry
+    <div class="footer">
+      &copy; ${new Date().getFullYear()} Market Signal Bot. All rights reserved.<br/>
+      Powered by FastAPI × Node.js × Twelve Data<br/>
+      <span style="font-size: 11px; color: #9ca3af;">Strategy: EMA50 Breakout + Pullback with 1:2 RR</span>
     </div>
-
   </div>
-
-  <div class="footer">
-    © ${new Date().getFullYear()} Smart Trading Bot<br/>
-    Powered by FastAPI × Node.js × Twelve Data
-  </div>
-
-</div>
 </body>
 </html>
 `;
-};
+
