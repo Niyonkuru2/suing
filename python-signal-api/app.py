@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
-import numpy as np
 
 app = FastAPI(title="EMA50 Breakout + Pullback Strategy API")
 
@@ -13,219 +12,227 @@ class MarketData(BaseModel):
     timeframe: str
 
 
-def detect_breakout_setup(df):
+# ------------------------------------------------------------------
+# Candle helpers
+# ------------------------------------------------------------------
+def is_red(row):
+    """Bearish / down candle."""
+    return row['close'] < row['open']
+
+
+def is_green(row):
+    """Bullish / up candle."""
+    return row['close'] > row['open']
+
+
+# ------------------------------------------------------------------
+# Core logic: find the swing point that sits right before a
+# correction of at least `min_correction` opposite-colored candles.
+# ------------------------------------------------------------------
+def find_correction_extreme(df, cross_idx, n, direction, min_correction=2):
     """
-    Detects your specific setup:
-    BUY: Price under EMA50 → breaks above EMA50 → makes a high → pulls back → closes above that high
-    SELL: Price above EMA50 → breaks below EMA50 → makes a low → pulls back → closes below that low
+    direction = "up"   -> we are tracking a BUY setup (price broke above EMA50)
+                          we track the running HIGH and look for a run of
+                          at least `min_correction` RED candles (the pullback).
+    direction = "down" -> we are tracking a SELL setup (price broke below EMA50)
+                          we track the running LOW and look for a run of
+                          at least `min_correction` GREEN candles (the pullback).
+
+    Returns:
+        extreme_price, extreme_idx, correction_end_idx
+        (correction_end_idx = first index AFTER the correction run finishes)
+    or (None, None, None) if no valid correction of the required length is found.
     """
-    
-    # Get last 30 candles for analysis
-    if len(df) < 30:
+    if direction == "up":
+        running_extreme = df['high'].iloc[cross_idx]
+        is_correction_candle = is_red
+        better = lambda new, old: new > old
+        price_col = 'high'
+    else:
+        running_extreme = df['low'].iloc[cross_idx]
+        is_correction_candle = is_green
+        better = lambda new, old: new < old
+        price_col = 'low'
+
+    extreme_idx = cross_idx
+    i = cross_idx + 1
+
+    while i < n:
+        row = df.iloc[i]
+        price = row[price_col]
+
+        # Still making new extremes (new high for BUY / new low for SELL) ->
+        # this pushes the reference point forward, no correction yet.
+        if better(price, running_extreme):
+            running_extreme = price
+            extreme_idx = i
+            i += 1
+            continue
+
+        # Not a new extreme - check if a correction (opposite color run) starts here
+        if is_correction_candle(row):
+            j = i
+            count = 0
+            while j < n and is_correction_candle(df.iloc[j]):
+                count += 1
+                j += 1
+
+            if count >= min_correction:
+                # Found a valid correction of the required length.
+                return running_extreme, extreme_idx, j
+            else:
+                # Correction too short - keep scanning from where it ended,
+                # the extreme reference stays the same.
+                i = j if j > i else i + 1
+        else:
+            i += 1
+
+    return None, None, None
+
+
+def find_last_cross(df, start, n, direction):
+    """
+    direction = "up"   -> most recent bar where price was below EMA50
+                          on the previous close and above EMA50 on this close.
+    direction = "down" -> the mirror image.
+    Returns the index of the cross bar, or None.
+    """
+    last_cross = None
+    for i in range(start + 1, n):
+        prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1]
+        curr_close, curr_ema = df['close'].iloc[i], df['ema50'].iloc[i]
+
+        if direction == "up" and prev_close < prev_ema and curr_close > curr_ema:
+            last_cross = i
+        elif direction == "down" and prev_close > prev_ema and curr_close < curr_ema:
+            last_cross = i
+
+    return last_cross
+
+
+def detect_breakout_setup(df, lookback=30, min_correction=2):
+    """
+    BUY setup:
+      1. Price is below EMA50, then closes above EMA50 (the breakout).
+      2. Price keeps making new highs, then pulls back with AT LEAST
+         `min_correction` consecutive RED candles.
+      3. The level to beat is the high made right before that red run.
+      4. Signal fires the moment a candle CLOSES back above that high.
+
+    SELL setup is the exact mirror (EMA50 breakdown, then a run of GREEN
+    candles pulling back up, level = the low made before that run, signal
+    fires when a candle closes back below that low).
+
+    Only returns a signal if the *latest* candle is the one satisfying the
+    entry condition (i.e. the signal is live right now).
+    """
+    n = len(df)
+    start = max(0, n - lookback)
+    if n - start < min_correction + 3:
         return None, None, None
-    
-    # We need to check the recent history
-    recent_df = df.iloc[-30:].copy()
-    
-    # Find where price crossed EMA50
-    recent_df['above_ema'] = recent_df['close'] > recent_df['ema50']
-    recent_df['below_ema'] = recent_df['close'] < recent_df['ema50']
-    recent_df['ema_cross_up'] = (recent_df['above_ema'] & recent_df['below_ema'].shift(1))
-    recent_df['ema_cross_down'] = (recent_df['below_ema'] & recent_df['above_ema'].shift(1))
-    
-    # Get latest candle
-    latest = df.iloc[-1]
-    
-    # Check if we have any recent crosses
-    if not recent_df['ema_cross_up'].any() and not recent_df['ema_cross_down'].any():
-        return None, None, None
-    
-    # =========================
-    # BUY SETUP DETECTION
-    # =========================
-    # Find the most recent EMA cross up
-    cross_up_indices = recent_df[recent_df['ema_cross_up']].index
-    if len(cross_up_indices) > 0:
-        last_cross_up_idx = cross_up_indices[-1]
-        
-        # Check if price was under EMA50 before cross
-        if last_cross_up_idx > 0 and recent_df.loc[last_cross_up_idx - 1, 'close'] < recent_df.loc[last_cross_up_idx - 1, 'ema50']:
-            
-            # Look for a high made after the cross
-            candles_after_cross = recent_df.loc[last_cross_up_idx:].copy()
-            
-            if len(candles_after_cross) >= 3:
-                # Find the highest high after cross
-                high_after_cross = candles_after_cross['high'].max()
-                high_idx_after_cross = candles_after_cross['high'].idxmax()
-                
-                # Check if current price pulled back and closed above that high
-                if high_idx_after_cross < len(df) - 1:  # Make sure we have candles after the high
-                    # Find candles after the high
-                    candles_after_high = df.loc[high_idx_after_cross + 1:].copy()
-                    
-                    if len(candles_after_high) > 0:
-                        # Check if price pulled back below the high
-                        if any(candles_after_high['close'] < df.loc[high_idx_after_cross, 'high']):
-                            # Check if current close is above that high
-                            if latest['close'] > df.loc[high_idx_after_cross, 'high']:
-                                return "BUY_TREND", df.loc[high_idx_after_cross, 'high'], high_idx_after_cross
-    
-    # =========================
-    # SELL SETUP DETECTION
-    # =========================
-    # Find the most recent EMA cross down
-    cross_down_indices = recent_df[recent_df['ema_cross_down']].index
-    if len(cross_down_indices) > 0:
-        last_cross_down_idx = cross_down_indices[-1]
-        
-        # Check if price was above EMA50 before cross
-        if last_cross_down_idx > 0 and recent_df.loc[last_cross_down_idx - 1, 'close'] > recent_df.loc[last_cross_down_idx - 1, 'ema50']:
-            
-            # Look for a low made after the cross
-            candles_after_cross = recent_df.loc[last_cross_down_idx:].copy()
-            
-            if len(candles_after_cross) >= 3:
-                # Find the lowest low after cross
-                low_after_cross = candles_after_cross['low'].min()
-                low_idx_after_cross = candles_after_cross['low'].idxmin()
-                
-                # Check if current price pulled back and closed below that low
-                if low_idx_after_cross < len(df) - 1:  # Make sure we have candles after the low
-                    # Find candles after the low
-                    candles_after_low = df.loc[low_idx_after_cross + 1:].copy()
-                    
-                    if len(candles_after_low) > 0:
-                        # Check if price pulled back above the low
-                        if any(candles_after_low['close'] > df.loc[low_idx_after_cross, 'low']):
-                            # Check if current close is below that low
-                            if latest['close'] < df.loc[low_idx_after_cross, 'low']:
-                                return "SELL_TREND", df.loc[low_idx_after_cross, 'low'], low_idx_after_cross
-    
+
+    latest_idx = n - 1
+
+    # ---------------- BUY ----------------
+    cross_up_idx = find_last_cross(df, start, n, "up")
+    if cross_up_idx is not None:
+        key_high, key_idx, correction_end_idx = find_correction_extreme(
+            df, cross_up_idx, n, "up", min_correction
+        )
+        if key_high is not None and latest_idx >= correction_end_idx:
+            if df['close'].iloc[latest_idx] > key_high:
+                return "BUY_TREND", key_high, key_idx
+
+    # ---------------- SELL ----------------
+    cross_down_idx = find_last_cross(df, start, n, "down")
+    if cross_down_idx is not None:
+        key_low, key_idx, correction_end_idx = find_correction_extreme(
+            df, cross_down_idx, n, "down", min_correction
+        )
+        if key_low is not None and latest_idx >= correction_end_idx:
+            if df['close'].iloc[latest_idx] < key_low:
+                return "SELL_TREND", key_low, key_idx
+
     return None, None, None
 
 
 @app.post("/analyze")
 def analyze(data: MarketData):
     df = pd.DataFrame(data.values)
-    
+
     if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
         return {"error": "Missing OHLC data"}
-    
+
     if len(df) < 60:
         return {"error": "Not enough data"}
-    
-    # Latest candle at bottom
+
+    # Incoming data is assumed newest-first -> flip so latest candle is last
     df = df.iloc[::-1].reset_index(drop=True)
-    
-    # Convert to float
+
     for col in ['open', 'high', 'low', 'close']:
         df[col] = df[col].astype(float)
-    
-    # =========================
-    # EMA 50
-    # =========================
+
+    # ---------------- EMA 50 ----------------
     df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
-    
+    df = df.dropna(subset=['ema50']).reset_index(drop=True)
+
+    if len(df) < 30:
+        return {"error": "Not enough data after EMA warm-up"}
+
     latest = df.iloc[-1]
-    
-    # =========================
-    # DETECT YOUR SETUP
-    # =========================
+
+    # ---------------- DETECT SETUP ----------------
     signal, key_level, key_idx = detect_breakout_setup(df)
-    
-    stop_loss = None
-    take_profit = None
-    structure_type = "NO_CLEAR_SETUP"
-    
-    # =========================
-    # BUY CONDITIONS
-    # =========================
+
     if signal == "BUY_TREND":
-        structure_type = "BREAKOUT_PULLBACK_BUY"
-        
-        # SL below the pullback low (the swing low after the breakout)
-        # Check candles after the breakout high
-        candles_after_breakout = df.loc[key_idx + 1:].copy()
-        if len(candles_after_breakout) > 0:
-            # Find the lowest low during pullback
-            pullback_low = candles_after_breakout['low'].min()
-            stop_loss = pullback_low  # SL below pullback low
-        else:
-            stop_loss = latest['close'] - (latest['close'] * 0.01)  # Default 1% stop
-        
-        # 1:2 Risk Reward
+        # Stop loss: lowest low made during the pullback (between the
+        # marked high and the entry candle).
+        pullback_slice = df.iloc[key_idx + 1:]
+        stop_loss = pullback_slice['low'].min() if len(pullback_slice) > 0 else latest['close'] * 0.99
+
         risk = latest['close'] - stop_loss
         take_profit = latest['close'] + (risk * 2)
-        
+
         return {
             "symbol": data.symbol,
             "timeframe": data.timeframe,
-            "setup_type": structure_type,
+            "setup_type": "BREAKOUT_PULLBACK_BUY",
             "signal": signal,
             "entry": round(latest['close'], 5),
-            "key_level": round(key_level, 5) if key_level else None,
+            "key_level": round(key_level, 5),
             "ema50": round(latest['ema50'], 5),
             "stop_loss": round(stop_loss, 5),
             "take_profit": round(take_profit, 5),
             "risk_reward": "1:2"
         }
-    
-    # =========================
-    # SELL CONDITIONS
-    # =========================
+
     elif signal == "SELL_TREND":
-        structure_type = "BREAKOUT_PULLBACK_SELL"
-        
-        # SL above the pullback high (the swing high after the breakdown)
-        candles_after_breakdown = df.loc[key_idx + 1:].copy()
-        if len(candles_after_breakdown) > 0:
-            # Find the highest high during pullback
-            pullback_high = candles_after_breakdown['high'].max()
-            stop_loss = pullback_high  # SL above pullback high
-        else:
-            stop_loss = latest['close'] + (latest['close'] * 0.01)  # Default 1% stop
-        
-        # 1:2 Risk Reward
+        pullback_slice = df.iloc[key_idx + 1:]
+        stop_loss = pullback_slice['high'].max() if len(pullback_slice) > 0 else latest['close'] * 1.01
+
         risk = stop_loss - latest['close']
         take_profit = latest['close'] - (risk * 2)
-        
+
         return {
             "symbol": data.symbol,
             "timeframe": data.timeframe,
-            "setup_type": structure_type,
+            "setup_type": "BREAKOUT_PULLBACK_SELL",
             "signal": signal,
             "entry": round(latest['close'], 5),
-            "key_level": round(key_level, 5) if key_level else None,
+            "key_level": round(key_level, 5),
             "ema50": round(latest['ema50'], 5),
             "stop_loss": round(stop_loss, 5),
             "take_profit": round(take_profit, 5),
             "risk_reward": "1:2"
         }
-    
-    # =========================
-    # NO SIGNAL
-    # =========================
+
     else:
-        # Check if we have any recent crosses for informational purposes
-        recent_df = df.iloc[-30:].copy()
-        recent_df['above_ema'] = recent_df['close'] > recent_df['ema50']
-        recent_df['below_ema'] = recent_df['close'] < recent_df['ema50']
-        recent_df['ema_cross_up'] = (recent_df['above_ema'] & recent_df['below_ema'].shift(1))
-        recent_df['ema_cross_down'] = (recent_df['below_ema'] & recent_df['above_ema'].shift(1))
-        
-        info = "No setup detected. "
-        if recent_df['ema_cross_up'].any():
-            info += "EMA cross up detected but no pullback and close above high yet. "
-        if recent_df['ema_cross_down'].any():
-            info += "EMA cross down detected but no pullback and close below low yet. "
-        
         return {
             "symbol": data.symbol,
             "timeframe": data.timeframe,
             "setup_type": "NO_SETUP",
             "signal": "NO_TRADE",
-            "info": info,
+            "info": "No valid EMA50 breakout + 2-candle-pullback setup detected yet.",
             "entry": round(latest['close'], 5),
             "ema50": round(latest['ema50'], 5),
             "stop_loss": None,
