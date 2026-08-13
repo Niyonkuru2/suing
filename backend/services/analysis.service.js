@@ -141,9 +141,9 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
 export const autoAnalyzeMarket = async () => {
   // Timeframes optimized for pullback strategy
   const pairs = [
-    { symbol: "EUR/USD", timeframe: "5m"},
-    { symbol: "GBP/USD", timeframe: "5m"},
-    { symbol: "USD/JPY", timeframe: "5m"},
+    { symbol: "EUR/USD", timeframe: "5min"},
+    { symbol: "GBP/USD", timeframe: "5min"},
+    { symbol: "USD/JPY", timeframe: "5min"},
     //{ symbol: "USD/CHF", timeframe: "1h" },
     //{ symbol: "NZD/USD", timeframe: "1h" },
     //{ symbol: "USD/CAD", timeframe: "1h" },
