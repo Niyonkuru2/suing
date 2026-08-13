@@ -6,69 +6,134 @@ import { marketSignalEmailTemplate } from "../utils/sendAlertEmail.js";
 export const performAnalysis = async (symbol, timeframe) => {
   try {
     const apiKey = process.env.TWELVE_DATA_API_KEY;
-    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${timeframe}&outputsize=200&apikey=${apiKey}`;
-    
-    // Fetch market data
+
+    if (!apiKey) {
+      throw new Error("TWELVE_DATA_API_KEY is missing");
+    }
+
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&outputsize=200&apikey=${apiKey}`;
+
+    console.log(`📡 Twelve Data request: ${symbol} ${timeframe}`);
+
     const response = await axios.get(url);
-    if (response.data.status === "error") throw new Error(response.data.message);
+
+    console.log("📥 Twelve Data status:", response.status);
+    console.log("📥 Twelve Data response:", response.data);
+
+    if (response.data.status === "error") {
+      throw new Error(
+        `Twelve Data error: ${response.data.message || "Unknown error"}`
+      );
+    }
 
     const marketData = response.data.values;
 
-    // Run Python analysis via FastAPI
-    const result = await runPythonAnalysis(marketData, symbol, timeframe);
+    if (!marketData || !Array.isArray(marketData)) {
+      throw new Error("Twelve Data returned no valid market data");
+    }
 
-    // Only send email if full signal exists
+    console.log(`📊 Received ${marketData.length} candles`);
+
+    const result = await runPythonAnalysis(
+      marketData,
+      symbol,
+      timeframe
+    );
+
+    console.log("🐍 Python analysis result:", result);
+
     if (["BUY", "SELL"].includes(result.signal)) {
-      // Get current timestamp
-      const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-      
-      // Generate email HTML with all required parameters
+      const timestamp =
+        new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+
       const emailHTML = marketSignalEmailTemplate(
-        result.symbol,                    // symbol
-        result.signal,                    // signal
-        result.timeframe,                 // timeframe
-        result.entry,                     // lastClose (entry price)
-        result.stop_loss,                 // stopLoss
-        result.take_profit,               // takeProfit
-        timestamp,                        // timestamp
-        result.setup_type || "Breakout + Pullback", // setupType
-        result.key_level || "N/A",        // keyLevel
-        result.ema50 || "N/A"            // ema50
+        result.symbol,
+        result.signal,
+        result.timeframe,
+        result.entry,
+        result.stop_loss,
+        result.take_profit,
+        timestamp,
+        result.setup_type || "Breakout + Pullback",
+        result.key_level || "N/A",
+        result.ema50 || "N/A"
       );
 
       await sendAlertEmail(
-        `🚨 ${result.symbol} ${result.signal} Signal Alert - ${result.setup_type || "Breakout + Pullback"}`,
+        `🚨 ${result.symbol} ${result.signal} Signal Alert - ${
+          result.setup_type || "Breakout + Pullback"
+        }`,
         emailHTML
       );
 
       console.log(
-        `✅ Signal sent: ${result.symbol} ${result.signal} (${result.setup_type || "Breakout + Pullback"})`
+        `✅ Signal sent: ${result.symbol} ${result.signal}`
       );
     } else {
       console.log(
-        `⏸️ No valid signal for ${symbol} (${timeframe}). Info: ${result.info || "No setup detected"}`
+        `⏸️ No valid signal for ${symbol} (${timeframe}). Info: ${
+          result.info || "No setup detected"
+        }`
       );
     }
 
     return result;
+
   } catch (err) {
-    console.error("❌ Analysis failed:", err.message);
+    console.error("❌ Analysis failed");
+    console.error("Message:", err.message);
+    console.error("Status:", err.response?.status);
+    console.error("Response:", err.response?.data);
+    console.error("URL:", err.config?.url);
+
     throw err;
   }
 };
 
 // Run analysis via FastAPI API
 const runPythonAnalysis = async (marketData, symbol, timeframe) => {
-  //const url = "https://five0ema-1-7wri.onrender.com/analyze";
   const url = "https://suing-s27n.onrender.com/analyze";
-  const payload = { values: marketData, symbol, timeframe };
+
+  const payload = {
+    values: marketData,
+    symbol,
+    timeframe,
+  };
+
+  console.log("🐍 Sending data to FastAPI:", {
+    url,
+    symbol,
+    timeframe,
+    candles: marketData.length,
+  });
 
   try {
-    const response = await axios.post(url, payload);
+    const response = await axios.post(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+      timeout: 30000,
+    });
+
+    console.log("🐍 FastAPI status:", response.status);
+    console.log("🐍 FastAPI response:", response.data);
+
     return response.data;
+
   } catch (error) {
-    console.error("❌ FastAPI request failed:", error.message);
-    throw new Error("Failed to analyze market data via Python API");
+    console.error("❌ FastAPI request failed");
+    console.error("Message:", error.message);
+    console.error("Status:", error.response?.status);
+    console.error("Response:", error.response?.data);
+    console.error("URL:", error.config?.url);
+
+    throw new Error(
+      `FastAPI analysis failed: ${
+        error.response?.data?.detail ||
+        error.response?.data?.message ||
+        error.message
+      }`
+    );
   }
 };
 
