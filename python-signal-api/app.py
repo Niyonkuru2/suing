@@ -1220,5 +1220,22 @@ def home():
             "EMA50 bullish break → 2+ red pullback → "
             "stay above EMA50 → close above key high",
 
-        
+        "sell_rule":
+            "EMA50 bearish break → 2+ green pullback → "
+            "stay below EMA50 → close below key low",
+
+        "risk_reward":
+            "1:2",
+
+        "ema_period":
+            EMA_PERIOD,
+
+        "minimum_pullback_candles":
+            MIN_PULLBACK_CANDLES,
+
+        "atr_period":
+            ATR_PERIOD,
+
+        "chandelier_multiplier":
+            CHANDLIER_MULTIPLIER
     }
