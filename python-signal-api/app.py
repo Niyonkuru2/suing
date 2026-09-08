@@ -1,245 +1,269 @@
-from fastapi import FastAPI 
-from pydantic import BaseModel 
-import pandas as pd 
-from ta.trend import EMAIndicator 
- 
-app = FastAPI(title="EMA50 Breakout + Pullback Strategy API") 
- 
- 
-class MarketData(BaseModel): 
-    values: list 
-    symbol: str 
-    timeframe: str 
- 
- 
-# ------------------------------------------------------------------ 
-# Candle helpers 
-# ------------------------------------------------------------------ 
-def is_red(row): 
-    """Bearish / down candle.""" 
-    return row['close'] < row['open'] 
- 
- 
-def is_green(row): 
-    """Bullish / up candle.""" 
-    return row['close'] > row['open'] 
- 
- 
-# ------------------------------------------------------------------ 
-# Core logic: find the swing point that sits right before a 
-# correction of at least `min_correction` opposite-colored candles. 
-# ------------------------------------------------------------------ 
-def find_correction_extreme(df, cross_idx, n, direction, min_correction=2): 
-    """ 
-    direction = "up"   -> we are tracking a BUY setup (price broke above EMA50) 
-                          we track the running HIGH and look for a run of 
-                          at least `min_correction` RED candles (the pullback). 
-    direction = "down" -> we are tracking a SELL setup (price broke below EMA50) 
-                          we track the running LOW and look for a run of 
-                          at least `min_correction` GREEN candles (the pullback). 
- 
-    Returns: 
-        extreme_price, extreme_idx, correction_end_idx 
-        (correction_end_idx = first index AFTER the correction run finishes) 
-    or (None, None, None) if no valid correction of the required length is found. 
-    """ 
-    if direction == "up": 
-        running_extreme = df['high'].iloc[cross_idx] 
-        is_correction_candle = is_red 
-        better = lambda new, old: new > old 
-        price_col = 'high' 
-    else: 
-        running_extreme = df['low'].iloc[cross_idx] 
-        is_correction_candle = is_green 
-        better = lambda new, old: new < old 
-        price_col = 'low' 
- 
-    extreme_idx = cross_idx 
-    i = cross_idx + 1 
- 
-    while i < n: 
-        row = df.iloc[i] 
-        price = row[price_col] 
- 
-        # Still making new extremes (new high for BUY / new low for SELL) -> 
-        # this pushes the reference point forward, no correction yet. 
-        if better(price, running_extreme): 
-            running_extreme = price 
-            extreme_idx = i 
-            i += 1 
-            continue 
- 
-        # Not a new extreme - check if a correction (opposite color run) starts here 
-        if is_correction_candle(row): 
-            j = i 
-            count = 0 
-            while j < n and is_correction_candle(df.iloc[j]): 
-                count += 1 
-                j += 1 
- 
-            if count >= min_correction: 
-                # Found a valid correction of the required length. 
-                return running_extreme, extreme_idx, j 
-            else: 
-                # Correction too short - keep scanning from where it ended, 
-                # the extreme reference stays the same. 
-                i = j if j > i else i + 1 
-        else: 
-            i += 1 
- 
-    return None, None, None 
- 
- 
-def find_last_cross(df, start, n, direction): 
-    """ 
-    direction = "up"   -> most recent bar where price was below EMA50 
-                          on the previous close and above EMA50 on this close. 
-    direction = "down" -> the mirror image. 
-    Returns the index of the cross bar, or None. 
-    """ 
-    last_cross = None 
-    for i in range(start + 1, n): 
-        prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1] 
-        curr_close, curr_ema = df['close'].iloc[i], df['ema50'].iloc[i] 
- 
-        if direction == "up" and prev_close < prev_ema and curr_close > curr_ema: 
-            last_cross = i 
-        elif direction == "down" and prev_close > prev_ema and curr_close < curr_ema: 
-            last_cross = i 
- 
-    return last_cross 
- 
- 
-def detect_breakout_setup(df, lookback=30, min_correction=2): 
-    """ 
-    BUY setup: 
-      1. Price is below EMA50, then closes above EMA50 (the breakout). 
-      2. Price keeps making new highs, then pulls back with AT LEAST 
-         `min_correction` consecutive RED candles. 
-      3. The level to beat is the high made right before that red run. 
-      4. Signal fires the moment a candle CLOSES back above that high. 
- 
-    SELL setup is the exact mirror (EMA50 breakdown, then a run of GREEN 
-    candles pulling back up, level = the low made before that run, signal 
-    fires when a candle closes back below that low). 
- 
-    Only returns a signal if the *latest* candle is the one satisfying the 
-    entry condition (i.e. the signal is live right now). 
-    """ 
-    n = len(df) 
-    start = max(0, n - lookback) 
-    if n - start < min_correction + 3: 
-        return None, None, None 
- 
-    latest_idx = n - 1 
- 
-    # ---------------- BUY ---------------- 
-    cross_up_idx = find_last_cross(df, start, n, "up") 
-    if cross_up_idx is not None: 
-        key_high, key_idx, correction_end_idx = find_correction_extreme( 
-            df, cross_up_idx, n, "up", min_correction 
-        ) 
-        if key_high is not None and latest_idx >= correction_end_idx: 
-            if df['close'].iloc[latest_idx] > key_high: 
-                return "BUY_TREND", key_high, key_idx 
- 
-    # ---------------- SELL ---------------- 
-    cross_down_idx = find_last_cross(df, start, n, "down") 
-    if cross_down_idx is not None: 
-        key_low, key_idx, correction_end_idx = find_correction_extreme( 
-            df, cross_down_idx, n, "down", min_correction 
-        ) 
-        if key_low is not None and latest_idx >= correction_end_idx: 
-            if df['close'].iloc[latest_idx] < key_low: 
-                return "SELL_TREND", key_low, key_idx 
- 
-    return None, None, None 
- 
- 
-@app.post("/analyze") 
-def analyze(data: MarketData): 
-    df = pd.DataFrame(data.values) 
- 
-    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']): 
-        return {"error": "Missing OHLC data"} 
- 
-    if len(df) < 60: 
-        return {"error": "Not enough data"} 
- 
-    # Incoming data is assumed newest-first -> flip so latest candle is last 
-    df = df.iloc[::-1].reset_index(drop=True) 
- 
-    for col in ['open', 'high', 'low', 'close']: 
-        df[col] = df[col].astype(float) 
- 
-    # ---------------- EMA 50 ---------------- 
-    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator() 
-    df = df.dropna(subset=['ema50']).reset_index(drop=True) 
- 
-    if len(df) < 30: 
-        return {"error": "Not enough data after EMA warm-up"} 
- 
-    latest = df.iloc[-1] 
- 
-    # ---------------- DETECT SETUP ---------------- 
-    signal, key_level, key_idx = detect_breakout_setup(df) 
- 
-    if signal == "BUY_TREND": 
-        # Stop loss: lowest low made during the pullback (between the 
-        # marked high and the entry candle). 
-        pullback_slice = df.iloc[key_idx + 1:] 
-        stop_loss = pullback_slice['low'].min() if len(pullback_slice) > 0 else latest['close'] * 0.99 
- 
-        risk = latest['close'] - stop_loss 
-        take_profit = latest['close'] + (risk * 2) 
- 
-        return { 
-            "symbol": data.symbol, 
-            "timeframe": data.timeframe, 
-            "setup_type": "BREAKOUT_PULLBACK_BUY", 
-            "signal": signal, 
-            "entry": round(latest['close'], 5), 
-            "key_level": round(key_level, 5), 
-            "ema50": round(latest['ema50'], 5), 
-            "stop_loss": round(stop_loss, 5), 
-            "take_profit": round(take_profit, 5), 
-            "risk_reward": "1:2" 
-        } 
- 
-    elif signal == "SELL_TREND": 
-        pullback_slice = df.iloc[key_idx + 1:] 
-        stop_loss = pullback_slice['high'].max() if len(pullback_slice) > 0 else latest['close'] * 1.01 
- 
-        risk = stop_loss - latest['close'] 
-        take_profit = latest['close'] - (risk * 2) 
- 
-        return { 
-            "symbol": data.symbol, 
-            "timeframe": data.timeframe, 
-            "setup_type": "BREAKOUT_PULLBACK_SELL", 
-            "signal": signal, 
-            "entry": round(latest['close'], 5), 
-            "key_level": round(key_level, 5), 
-            "ema50": round(latest['ema50'], 5), 
-            "stop_loss": round(stop_loss, 5), 
-            "take_profit": round(take_profit, 5), 
-            "risk_reward": "1:2" 
-        } 
- 
-    else: 
-        return { 
-            "symbol": data.symbol, 
-            "timeframe": data.timeframe, 
-            "setup_type": "NO_SETUP", 
-            "signal": "NO_TRADE", 
-            "info": "No valid EMA50 breakout + 2-candle-pullback setup detected yet.", 
-            "entry": round(latest['close'], 5), 
-            "ema50": round(latest['ema50'], 5), 
-            "stop_loss": None, 
-            "take_profit": None 
-        } 
- 
- 
-@app.get("/") 
-def home(): 
-    return {"message": "EMA50 Breakout + Pullback Strategy API running successfully"}
+"""
+EMA50 Breakout + Pullback + Confirmation Strategy
+==================================================
+
+Rules taught in the video:
+
+BUY
+  1. Price is below 50 EMA, then a candle CLOSES above the 50 EMA (trend break).
+  2. Wait for a real pullback = TWO CONSECUTIVE RED candles coming down
+     (after price may have kept making new highs first).
+  3. Mark the swing HIGH made right before that 2-red-candle pullback.
+     Entry trigger = a candle CLOSES back above that swing high.
+
+SELL (mirror image)
+  1. Price is above 50 EMA, then a candle CLOSES below the 50 EMA.
+  2. Wait for TWO CONSECUTIVE GREEN candles coming up (pullback).
+  3. Mark the swing LOW made right before that pullback.
+     Entry trigger = a candle CLOSES back below that swing low.
+
+Why the old version gave "NEUTRAL" all the time
+-------------------------------------------------
+`find_last_cross()` only searched the last `lookback` (30) candles for an
+EMA cross. On instruments/timeframes where price doesn't cross the 50 EMA
+within 30 bars (very common on higher timeframes), `cross_idx` was always
+None -> the function returned NO_SETUP no matter what. It also didn't
+reset the pullback counter if the two "opposite" candles weren't truly
+back-to-back (e.g. red-green-red was miscounted).
+
+This version walks the whole series ONCE as a state machine (no lookback
+window needed) and tracks bullish/bearish progress independently, step
+by step, so nothing is missed and you can always see which step you're
+currently stuck on.
+"""
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+import pandas as pd
+from ta.trend import EMAIndicator
+
+app = FastAPI(title="EMA50 Breakout + Pullback Strategy API")
+
+
+class MarketData(BaseModel):
+    values: list          # list of dicts with open/high/low/close (newest first)
+    symbol: str
+    timeframe: str
+
+
+# ------------------------------------------------------------------
+# Candle helpers
+# ------------------------------------------------------------------
+def is_red(row):
+    return row['close'] < row['open']
+
+
+def is_green(row):
+    return row['close'] > row['open']
+
+
+# ------------------------------------------------------------------
+# Core state machine
+# ------------------------------------------------------------------
+def run_strategy(df: pd.DataFrame):
+    """
+    Walks the dataframe bar by bar and tracks a bullish and a bearish
+    setup independently. Returns:
+        signal        -> "BUY_TREND" / "SELL_TREND" / None
+        key_level     -> the swing high/low used as the entry trigger
+        pullback_low_high -> extreme reached during pullback (for stop loss)
+        status        -> dict describing current phase of BOTH setups
+                          (useful for debugging / alerting on "no trade yet")
+    Only a signal on the LATEST bar is reported as an actionable alert;
+    everything else is exposed via `status` so you can see progress.
+    """
+    n = len(df)
+
+    # bullish setup state
+    bull_state = "IDLE"          # IDLE -> TRACKING_HIGH -> ARMED
+    bull_swing_high = None
+    bull_pullback_count = 0
+    bull_pullback_low = None     # lowest low seen during the pullback (for SL)
+
+    # bearish setup state
+    bear_state = "IDLE"
+    bear_swing_low = None
+    bear_pullback_count = 0
+    bear_pullback_high = None    # highest high seen during the pullback (for SL)
+
+    last_signal = None
+    last_key_level = None
+    last_pullback_extreme = None
+
+    for i in range(1, n):
+        prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1]
+        close, ema = df['close'].iloc[i], df['ema50'].iloc[i]
+        high, low = df['high'].iloc[i], df['low'].iloc[i]
+        row = df.iloc[i]
+
+        crossed_up = prev_close < prev_ema and close > ema
+        crossed_down = prev_close > prev_ema and close < ema
+
+        # ---------------- BULLISH SETUP ----------------
+        if crossed_up:
+            # Step 1 complete -> start tracking swing high, cancel any bearish setup
+            bull_state = "TRACKING_HIGH"
+            bull_swing_high = high
+            bull_pullback_count = 0
+            bull_pullback_low = None
+            bear_state = "IDLE"
+
+        elif bull_state == "TRACKING_HIGH":
+            if high > bull_swing_high:
+                # still making new highs, pullback hasn't started
+                bull_swing_high = high
+                bull_pullback_count = 0
+                bull_pullback_low = None
+            elif is_red(row):
+                bull_pullback_count += 1
+                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
+                if bull_pullback_count >= 2:
+                    bull_state = "ARMED"   # Step 2 complete
+            else:
+                # green candle before pullback confirmed -> not consecutive, reset count
+                bull_pullback_count = 0
+                bull_pullback_low = None
+            if close < ema:
+                bull_state = "IDLE"        # trend broke back down, setup invalidated
+
+        elif bull_state == "ARMED":
+            if is_red(row):
+                # extend pullback low tracking in case breakout hasn't happened yet
+                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
+            if close > bull_swing_high:
+                # Step 3 complete -> BUY signal on this bar
+                last_signal = "BUY_TREND"
+                last_key_level = bull_swing_high
+                last_pullback_extreme = bull_pullback_low
+                bull_state = "IDLE"        # reset, ready to look for next setup
+            elif close < ema:
+                bull_state = "IDLE"        # invalidated before breakout
+
+        # ---------------- BEARISH SETUP ----------------
+        if crossed_down:
+            bear_state = "TRACKING_LOW"
+            bear_swing_low = low
+            bear_pullback_count = 0
+            bear_pullback_high = None
+            bull_state = "IDLE"
+
+        elif bear_state == "TRACKING_LOW":
+            if low < bear_swing_low:
+                bear_swing_low = low
+                bear_pullback_count = 0
+                bear_pullback_high = None
+            elif is_green(row):
+                bear_pullback_count += 1
+                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
+                if bear_pullback_count >= 2:
+                    bear_state = "ARMED"
+            else:
+                bear_pullback_count = 0
+                bear_pullback_high = None
+            if close > ema:
+                bear_state = "IDLE"
+
+        elif bear_state == "ARMED":
+            if is_green(row):
+                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
+            if close < bear_swing_low:
+                last_signal = "SELL_TREND"
+                last_key_level = bear_swing_low
+                last_pullback_extreme = bear_pullback_high
+                bear_state = "IDLE"
+            elif close > ema:
+                bear_state = "IDLE"
+
+        # Only the FINAL bar's signal is the live/actionable one
+        if i < n - 1:
+            last_signal = None
+            last_key_level = None
+            last_pullback_extreme = None
+
+    status = {
+        "bull_phase": bull_state,
+        "bull_pullback_candles": bull_pullback_count,
+        "bull_swing_high": round(bull_swing_high, 5) if bull_swing_high else None,
+        "bear_phase": bear_state,
+        "bear_pullback_candles": bear_pullback_count,
+        "bear_swing_low": round(bear_swing_low, 5) if bear_swing_low else None,
+    }
+
+    return last_signal, last_key_level, last_pullback_extreme, status
+
+
+@app.post("/analyze")
+def analyze(data: MarketData):
+    df = pd.DataFrame(data.values)
+
+    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
+        return {"error": "Missing OHLC data"}
+
+    if len(df) < 60:
+        return {"error": "Not enough data (need at least 60 candles for EMA50 warm-up + history)"}
+
+    # Incoming data assumed newest-first -> flip so latest candle is last
+    df = df.iloc[::-1].reset_index(drop=True)
+
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
+
+    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
+    df = df.dropna(subset=['ema50']).reset_index(drop=True)
+
+    if len(df) < 5:
+        return {"error": "Not enough data after EMA50 warm-up"}
+
+    latest = df.iloc[-1]
+    signal, key_level, pullback_extreme, status = run_strategy(df)
+
+    base_response = {
+        "symbol": data.symbol,
+        "timeframe": data.timeframe,
+        "entry_price": round(latest['close'], 5),
+        "ema50": round(latest['ema50'], 5),
+        "status": status,   # <-- always shows WHY it's neutral, if it is
+    }
+
+    if signal == "BUY_TREND":
+        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 0.99
+        risk = latest['close'] - stop_loss
+        take_profit = latest['close'] + (risk * 2)
+        base_response.update({
+            "setup_type": "BREAKOUT_PULLBACK_BUY",
+            "signal": "BUY",
+            "key_level": round(key_level, 5),
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
+            "risk_reward": "1:2",
+        })
+
+    elif signal == "SELL_TREND":
+        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 1.01
+        risk = stop_loss - latest['close']
+        take_profit = latest['close'] - (risk * 2)
+        base_response.update({
+            "setup_type": "BREAKOUT_PULLBACK_SELL",
+            "signal": "SELL",
+            "key_level": round(key_level, 5),
+            "stop_loss": round(stop_loss, 5),
+            "take_profit": round(take_profit, 5),
+            "risk_reward": "1:2",
+        })
+
+    else:
+        base_response.update({
+            "setup_type": "NO_SETUP",
+            "signal": "NEUTRAL",
+            "info": "No entry trigger on the latest candle yet — see 'status' for current phase.",
+            "key_level": None,
+            "stop_loss": None,
+            "take_profit": None,
+        })
+
+    return base_response
+
+
+@app.get("/")
+def home():
+    return {"message": "EMA50 Breakout + Pullback Strategy API (state-machine version) running successfully"}
