@@ -1,269 +1,724 @@
-"""
-EMA50 Breakout + Pullback + Confirmation Strategy
-==================================================
-
-Rules taught in the video:
-
-BUY
-  1. Price is below 50 EMA, then a candle CLOSES above the 50 EMA (trend break).
-  2. Wait for a real pullback = TWO CONSECUTIVE RED candles coming down
-     (after price may have kept making new highs first).
-  3. Mark the swing HIGH made right before that 2-red-candle pullback.
-     Entry trigger = a candle CLOSES back above that swing high.
-
-SELL (mirror image)
-  1. Price is above 50 EMA, then a candle CLOSES below the 50 EMA.
-  2. Wait for TWO CONSECUTIVE GREEN candles coming up (pullback).
-  3. Mark the swing LOW made right before that pullback.
-     Entry trigger = a candle CLOSES back below that swing low.
-
-Why the old version gave "NEUTRAL" all the time
--------------------------------------------------
-`find_last_cross()` only searched the last `lookback` (30) candles for an
-EMA cross. On instruments/timeframes where price doesn't cross the 50 EMA
-within 30 bars (very common on higher timeframes), `cross_idx` was always
-None -> the function returned NO_SETUP no matter what. It also didn't
-reset the pullback counter if the two "opposite" candles weren't truly
-back-to-back (e.g. red-green-red was miscounted).
-
-This version walks the whole series ONCE as a state machine (no lookback
-window needed) and tracks bullish/bearish progress independently, step
-by step, so nothing is missed and you can always see which step you're
-currently stuck on.
-"""
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 from ta.trend import EMAIndicator
 
-app = FastAPI(title="EMA50 Breakout + Pullback Strategy API")
+app = FastAPI(
+    title="EMA50 Breakout + Pullback Strategy API",
+    version="2.0"
+)
 
+
+# ================================================================
+# REQUEST MODEL
+# ================================================================
 
 class MarketData(BaseModel):
-    values: list          # list of dicts with open/high/low/close (newest first)
+    values: list
     symbol: str
     timeframe: str
 
 
-# ------------------------------------------------------------------
-# Candle helpers
-# ------------------------------------------------------------------
+# ================================================================
+# CANDLE HELPERS
+# ================================================================
+
 def is_red(row):
-    return row['close'] < row['open']
+    return row["close"] < row["open"]
 
 
 def is_green(row):
-    return row['close'] > row['open']
+    return row["close"] > row["open"]
 
 
-# ------------------------------------------------------------------
-# Core state machine
-# ------------------------------------------------------------------
-def run_strategy(df: pd.DataFrame):
-    """
-    Walks the dataframe bar by bar and tracks a bullish and a bearish
-    setup independently. Returns:
-        signal        -> "BUY_TREND" / "SELL_TREND" / None
-        key_level     -> the swing high/low used as the entry trigger
-        pullback_low_high -> extreme reached during pullback (for stop loss)
-        status        -> dict describing current phase of BOTH setups
-                          (useful for debugging / alerting on "no trade yet")
-    Only a signal on the LATEST bar is reported as an actionable alert;
-    everything else is exposed via `status` so you can see progress.
-    """
-    n = len(df)
+# ================================================================
+# RESET HELPERS
+# ================================================================
 
-    # bullish setup state
-    bull_state = "IDLE"          # IDLE -> TRACKING_HIGH -> ARMED
-    bull_swing_high = None
-    bull_pullback_count = 0
-    bull_pullback_low = None     # lowest low seen during the pullback (for SL)
-
-    # bearish setup state
-    bear_state = "IDLE"
-    bear_swing_low = None
-    bear_pullback_count = 0
-    bear_pullback_high = None    # highest high seen during the pullback (for SL)
-
-    last_signal = None
-    last_key_level = None
-    last_pullback_extreme = None
-
-    for i in range(1, n):
-        prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1]
-        close, ema = df['close'].iloc[i], df['ema50'].iloc[i]
-        high, low = df['high'].iloc[i], df['low'].iloc[i]
-        row = df.iloc[i]
-
-        crossed_up = prev_close < prev_ema and close > ema
-        crossed_down = prev_close > prev_ema and close < ema
-
-        # ---------------- BULLISH SETUP ----------------
-        if crossed_up:
-            # Step 1 complete -> start tracking swing high, cancel any bearish setup
-            bull_state = "TRACKING_HIGH"
-            bull_swing_high = high
-            bull_pullback_count = 0
-            bull_pullback_low = None
-            bear_state = "IDLE"
-
-        elif bull_state == "TRACKING_HIGH":
-            if high > bull_swing_high:
-                # still making new highs, pullback hasn't started
-                bull_swing_high = high
-                bull_pullback_count = 0
-                bull_pullback_low = None
-            elif is_red(row):
-                bull_pullback_count += 1
-                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
-                if bull_pullback_count >= 2:
-                    bull_state = "ARMED"   # Step 2 complete
-            else:
-                # green candle before pullback confirmed -> not consecutive, reset count
-                bull_pullback_count = 0
-                bull_pullback_low = None
-            if close < ema:
-                bull_state = "IDLE"        # trend broke back down, setup invalidated
-
-        elif bull_state == "ARMED":
-            if is_red(row):
-                # extend pullback low tracking in case breakout hasn't happened yet
-                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
-            if close > bull_swing_high:
-                # Step 3 complete -> BUY signal on this bar
-                last_signal = "BUY_TREND"
-                last_key_level = bull_swing_high
-                last_pullback_extreme = bull_pullback_low
-                bull_state = "IDLE"        # reset, ready to look for next setup
-            elif close < ema:
-                bull_state = "IDLE"        # invalidated before breakout
-
-        # ---------------- BEARISH SETUP ----------------
-        if crossed_down:
-            bear_state = "TRACKING_LOW"
-            bear_swing_low = low
-            bear_pullback_count = 0
-            bear_pullback_high = None
-            bull_state = "IDLE"
-
-        elif bear_state == "TRACKING_LOW":
-            if low < bear_swing_low:
-                bear_swing_low = low
-                bear_pullback_count = 0
-                bear_pullback_high = None
-            elif is_green(row):
-                bear_pullback_count += 1
-                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
-                if bear_pullback_count >= 2:
-                    bear_state = "ARMED"
-            else:
-                bear_pullback_count = 0
-                bear_pullback_high = None
-            if close > ema:
-                bear_state = "IDLE"
-
-        elif bear_state == "ARMED":
-            if is_green(row):
-                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
-            if close < bear_swing_low:
-                last_signal = "SELL_TREND"
-                last_key_level = bear_swing_low
-                last_pullback_extreme = bear_pullback_high
-                bear_state = "IDLE"
-            elif close > ema:
-                bear_state = "IDLE"
-
-        # Only the FINAL bar's signal is the live/actionable one
-        if i < n - 1:
-            last_signal = None
-            last_key_level = None
-            last_pullback_extreme = None
-
-    status = {
-        "bull_phase": bull_state,
-        "bull_pullback_candles": bull_pullback_count,
-        "bull_swing_high": round(bull_swing_high, 5) if bull_swing_high else None,
-        "bear_phase": bear_state,
-        "bear_pullback_candles": bear_pullback_count,
-        "bear_swing_low": round(bear_swing_low, 5) if bear_swing_low else None,
+def reset_bull():
+    return {
+        "state": "IDLE",
+        "swing_high": None,
+        "pullback_count": 0,
+        "pullback_low": None,
+        "setup_start": None,
     }
 
-    return last_signal, last_key_level, last_pullback_extreme, status
 
+def reset_bear():
+    return {
+        "state": "IDLE",
+        "swing_low": None,
+        "pullback_count": 0,
+        "pullback_high": None,
+        "setup_start": None,
+    }
+
+
+# ================================================================
+# CORE STRATEGY
+# ================================================================
+
+def run_strategy(df: pd.DataFrame):
+
+    n = len(df)
+
+    bull = reset_bull()
+    bear = reset_bear()
+
+    latest_signal = None
+    latest_key_level = None
+    latest_pullback_extreme = None
+
+    # ------------------------------------------------------------
+    # We scan from oldest candle to newest candle.
+    # ------------------------------------------------------------
+
+    for i in range(1, n):
+
+        prev_close = df["close"].iloc[i - 1]
+        prev_ema = df["ema50"].iloc[i - 1]
+
+        close = df["close"].iloc[i]
+        ema = df["ema50"].iloc[i]
+
+        high = df["high"].iloc[i]
+        low = df["low"].iloc[i]
+
+        row = df.iloc[i]
+
+        # ========================================================
+        # EMA TREND CONDITIONS
+        # ========================================================
+
+        crossed_up = (
+            prev_close <= prev_ema
+            and close > ema
+        )
+
+        crossed_down = (
+            prev_close >= prev_ema
+            and close < ema
+        )
+
+        above_ema = close > ema
+        below_ema = close < ema
+
+        # ========================================================
+        # NEW BULLISH EMA CROSS
+        # ========================================================
+
+        if crossed_up:
+
+            bull = {
+                "state": "TRACKING_HIGH",
+                "swing_high": high,
+                "pullback_count": 0,
+                "pullback_low": None,
+                "setup_start": i,
+            }
+
+            # Opposite setup is invalidated
+            bear = reset_bear()
+
+        # ========================================================
+        # NEW BEARISH EMA CROSS
+        # ========================================================
+
+        elif crossed_down:
+
+            bear = {
+                "state": "TRACKING_LOW",
+                "swing_low": low,
+                "pullback_count": 0,
+                "pullback_high": None,
+                "setup_start": i,
+            }
+
+            # Opposite setup is invalidated
+            bull = reset_bull()
+
+        # ========================================================
+        # BULLISH SETUP
+        # ========================================================
+
+        if bull["state"] == "TRACKING_HIGH":
+
+            # If price continues making higher highs,
+            # update the swing high.
+            if high > bull["swing_high"]:
+
+                bull["swing_high"] = high
+
+                # New high means pullback has not been confirmed.
+                bull["pullback_count"] = 0
+                bull["pullback_low"] = None
+
+            # Red candle = pullback candle
+            elif is_red(row):
+
+                bull["pullback_count"] += 1
+
+                if bull["pullback_low"] is None:
+                    bull["pullback_low"] = low
+                else:
+                    bull["pullback_low"] = min(
+                        bull["pullback_low"],
+                        low
+                    )
+
+                # Two or more pullback candles = ARMED
+                if bull["pullback_count"] >= 2:
+
+                    bull["state"] = "ARMED"
+
+            # Green candle after pullback has not reached
+            # required confirmation yet.
+            else:
+
+                # Do not destroy the entire bullish trend.
+                # Only reset the pullback counter.
+                bull["pullback_count"] = 0
+                bull["pullback_low"] = None
+
+            # If candle closes below EMA, invalidate.
+            if close < ema:
+
+                bull = reset_bull()
+
+        # ========================================================
+        # BULLISH ARMED STATE
+        # ========================================================
+
+        elif bull["state"] == "ARMED":
+
+            # Continue tracking the lowest point of pullback.
+            if low < bull["pullback_low"]:
+                bull["pullback_low"] = low
+
+            # ----------------------------------------------------
+            # BREAKOUT CONFIRMATION
+            #
+            # IMPORTANT:
+            # We use CLOSE > swing high.
+            # A wick above the level is NOT enough.
+            # ----------------------------------------------------
+
+            if close > bull["swing_high"]:
+
+                latest_signal = "BUY_TREND"
+                latest_key_level = bull["swing_high"]
+                latest_pullback_extreme = bull["pullback_low"]
+
+                # Reset after signal
+                bull = reset_bull()
+
+            # Price lost EMA before breakout
+            elif close < ema:
+
+                bull = reset_bull()
+
+        # ========================================================
+        # BEARISH SETUP
+        # ========================================================
+
+        if bear["state"] == "TRACKING_LOW":
+
+            # Continue making lower lows
+            if low < bear["swing_low"]:
+
+                bear["swing_low"] = low
+
+                bear["pullback_count"] = 0
+                bear["pullback_high"] = None
+
+            # Green candle = bearish pullback
+            elif is_green(row):
+
+                bear["pullback_count"] += 1
+
+                if bear["pullback_high"] is None:
+                    bear["pullback_high"] = high
+                else:
+                    bear["pullback_high"] = max(
+                        bear["pullback_high"],
+                        high
+                    )
+
+                # Two or more pullback candles
+                if bear["pullback_count"] >= 2:
+
+                    bear["state"] = "ARMED"
+
+            else:
+
+                bear["pullback_count"] = 0
+                bear["pullback_high"] = None
+
+            # Price closed above EMA -> invalidate
+            if close > ema:
+
+                bear = reset_bear()
+
+        # ========================================================
+        # BEARISH ARMED STATE
+        # ========================================================
+
+        elif bear["state"] == "ARMED":
+
+            # Continue tracking highest pullback point
+            if high > bear["pullback_high"]:
+                bear["pullback_high"] = high
+
+            # ----------------------------------------------------
+            # BREAKDOWN CONFIRMATION
+            #
+            # CLOSE must be below swing low.
+            # ----------------------------------------------------
+
+            if close < bear["swing_low"]:
+
+                latest_signal = "SELL_TREND"
+                latest_key_level = bear["swing_low"]
+                latest_pullback_extreme = bear["pullback_high"]
+
+                bear = reset_bear()
+
+            # Price lost bearish trend
+            elif close > ema:
+
+                bear = reset_bear()
+
+    # ============================================================
+    # CURRENT STATUS
+    # ============================================================
+
+    status = {
+
+        # ---------------- BULL ----------------
+
+        "bull_phase": bull["state"],
+
+        "bull_pullback_candles": bull["pullback_count"],
+
+        "bull_swing_high": (
+            round(bull["swing_high"], 5)
+            if bull["swing_high"] is not None
+            else None
+        ),
+
+        "bull_pullback_low": (
+            round(bull["pullback_low"], 5)
+            if bull["pullback_low"] is not None
+            else None
+        ),
+
+        # ---------------- BEAR ----------------
+
+        "bear_phase": bear["state"],
+
+        "bear_pullback_candles": bear["pullback_count"],
+
+        "bear_swing_low": (
+            round(bear["swing_low"], 5)
+            if bear["swing_low"] is not None
+            else None
+        ),
+
+        "bear_pullback_high": (
+            round(bear["pullback_high"], 5)
+            if bear["pullback_high"] is not None
+            else None
+        ),
+    }
+
+    return (
+        latest_signal,
+        latest_key_level,
+        latest_pullback_extreme,
+        status
+    )
+
+
+# ================================================================
+# ANALYZE ENDPOINT
+# ================================================================
 
 @app.post("/analyze")
 def analyze(data: MarketData):
+
+    # ------------------------------------------------------------
+    # Create dataframe
+    # ------------------------------------------------------------
+
     df = pd.DataFrame(data.values)
 
-    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
-        return {"error": "Missing OHLC data"}
+    required_columns = [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]
+
+    if not all(col in df.columns for col in required_columns):
+
+        return {
+            "error": "Missing OHLC data"
+        }
+
+    # ------------------------------------------------------------
+    # Minimum data
+    # ------------------------------------------------------------
 
     if len(df) < 60:
-        return {"error": "Not enough data (need at least 60 candles for EMA50 warm-up + history)"}
 
-    # Incoming data assumed newest-first -> flip so latest candle is last
-    df = df.iloc[::-1].reset_index(drop=True)
+        return {
+            "error": (
+                "Not enough data. "
+                "Need at least 60 candles "
+                "for EMA50 calculation."
+            )
+        }
 
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
+    # ------------------------------------------------------------
+    # API sends newest FIRST.
+    #
+    # Convert to oldest FIRST.
+    # ------------------------------------------------------------
 
-    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
-    df = df.dropna(subset=['ema50']).reset_index(drop=True)
+    df = (
+        df.iloc[::-1]
+        .reset_index(drop=True)
+    )
+
+    # ------------------------------------------------------------
+    # Convert OHLC to numbers
+    # ------------------------------------------------------------
+
+    for col in required_columns:
+
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    # Remove invalid candles
+    df = df.dropna(
+        subset=required_columns
+    ).reset_index(drop=True)
+
+    # ------------------------------------------------------------
+    # EMA50
+    # ------------------------------------------------------------
+
+    df["ema50"] = EMAIndicator(
+        close=df["close"],
+        window=50
+    ).ema_indicator()
+
+    # Remove EMA warm-up
+    df = df.dropna(
+        subset=["ema50"]
+    ).reset_index(drop=True)
 
     if len(df) < 5:
-        return {"error": "Not enough data after EMA50 warm-up"}
+
+        return {
+            "error": "Not enough data after EMA50 calculation"
+        }
+
+    # ------------------------------------------------------------
+    # Latest candle
+    # ------------------------------------------------------------
 
     latest = df.iloc[-1]
-    signal, key_level, pullback_extreme, status = run_strategy(df)
 
-    base_response = {
+    # ------------------------------------------------------------
+    # Run strategy
+    # ------------------------------------------------------------
+
+    (
+        signal,
+        key_level,
+        pullback_extreme,
+        status
+    ) = run_strategy(df)
+
+    # ------------------------------------------------------------
+    # Base response
+    # ------------------------------------------------------------
+
+    response = {
+
         "symbol": data.symbol,
+
         "timeframe": data.timeframe,
-        "entry_price": round(latest['close'], 5),
-        "ema50": round(latest['ema50'], 5),
-        "status": status,   # <-- always shows WHY it's neutral, if it is
+
+        "entry_price": round(
+            float(latest["close"]),
+            5
+        ),
+
+        "ema50": round(
+            float(latest["ema50"]),
+            5
+        ),
+
+        "price_vs_ema": (
+            "ABOVE"
+            if latest["close"] > latest["ema50"]
+            else "BELOW"
+        ),
+
+        "status": status,
     }
 
+    # ============================================================
+    # BUY
+    # ============================================================
+
     if signal == "BUY_TREND":
-        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 0.99
-        risk = latest['close'] - stop_loss
-        take_profit = latest['close'] + (risk * 2)
-        base_response.update({
-            "setup_type": "BREAKOUT_PULLBACK_BUY",
-            "signal": "BUY",
-            "key_level": round(key_level, 5),
-            "stop_loss": round(stop_loss, 5),
-            "take_profit": round(take_profit, 5),
-            "risk_reward": "1:2",
+
+        if (
+            pullback_extreme is None
+            or pullback_extreme >= latest["close"]
+        ):
+
+            return {
+                **response,
+                "setup_type": "INVALID_BUY_SETUP",
+                "signal": "NEUTRAL",
+                "info": "Invalid pullback stop level."
+            }
+
+        stop_loss = float(
+            pullback_extreme
+        )
+
+        entry = float(
+            latest["close"]
+        )
+
+        risk = entry - stop_loss
+
+        if risk <= 0:
+
+            return {
+                **response,
+                "setup_type": "INVALID_BUY_SETUP",
+                "signal": "NEUTRAL",
+                "info": "Invalid BUY risk distance."
+            }
+
+        take_profit = (
+            entry + (risk * 2)
+        )
+
+        response.update({
+
+            "setup_type":
+                "BREAKOUT_PULLBACK_BUY",
+
+            "signal":
+                "BUY",
+
+            "key_level":
+                round(float(key_level), 5),
+
+            "stop_loss":
+                round(stop_loss, 5),
+
+            "take_profit":
+                round(take_profit, 5),
+
+            "risk_distance":
+                round(risk, 5),
+
+            "risk_reward":
+                "1:2",
+
+            "confirmation":
+                "Candle closed above swing high."
         })
+
+    # ============================================================
+    # SELL
+    # ============================================================
 
     elif signal == "SELL_TREND":
-        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 1.01
-        risk = stop_loss - latest['close']
-        take_profit = latest['close'] - (risk * 2)
-        base_response.update({
-            "setup_type": "BREAKOUT_PULLBACK_SELL",
-            "signal": "SELL",
-            "key_level": round(key_level, 5),
-            "stop_loss": round(stop_loss, 5),
-            "take_profit": round(take_profit, 5),
-            "risk_reward": "1:2",
+
+        if (
+            pullback_extreme is None
+            or pullback_extreme <= latest["close"]
+        ):
+
+            return {
+                **response,
+                "setup_type": "INVALID_SELL_SETUP",
+                "signal": "NEUTRAL",
+                "info": "Invalid pullback stop level."
+            }
+
+        stop_loss = float(
+            pullback_extreme
+        )
+
+        entry = float(
+            latest["close"]
+        )
+
+        risk = stop_loss - entry
+
+        if risk <= 0:
+
+            return {
+                **response,
+                "setup_type": "INVALID_SELL_SETUP",
+                "signal": "NEUTRAL",
+                "info": "Invalid SELL risk distance."
+            }
+
+        take_profit = (
+            entry - (risk * 2)
+        )
+
+        response.update({
+
+            "setup_type":
+                "BREAKOUT_PULLBACK_SELL",
+
+            "signal":
+                "SELL",
+
+            "key_level":
+                round(float(key_level), 5),
+
+            "stop_loss":
+                round(stop_loss, 5),
+
+            "take_profit":
+                round(take_profit, 5),
+
+            "risk_distance":
+                round(risk, 5),
+
+            "risk_reward":
+                "1:2",
+
+            "confirmation":
+                "Candle closed below swing low."
         })
+
+    # ============================================================
+    # NO ACTIONABLE SIGNAL
+    # ============================================================
 
     else:
-        base_response.update({
-            "setup_type": "NO_SETUP",
-            "signal": "NEUTRAL",
-            "info": "No entry trigger on the latest candle yet — see 'status' for current phase.",
-            "key_level": None,
-            "stop_loss": None,
-            "take_profit": None,
+
+        # Determine useful human-readable status
+
+        if status["bull_phase"] == "ARMED":
+
+            info = (
+                "Bullish setup armed. "
+                "Waiting for candle close above "
+                "the swing high."
+            )
+
+            setup_type = (
+                "BREAKOUT_PULLBACK_BUY_WAITING"
+            )
+
+            signal_status = "WAIT_BUY"
+
+        elif status["bear_phase"] == "ARMED":
+
+            info = (
+                "Bearish setup armed. "
+                "Waiting for candle close below "
+                "the swing low."
+            )
+
+            setup_type = (
+                "BREAKOUT_PULLBACK_SELL_WAITING"
+            )
+
+            signal_status = "WAIT_SELL"
+
+        elif status["bull_phase"] == "TRACKING_HIGH":
+
+            info = (
+                "Bullish trend detected. "
+                "Waiting for pullback confirmation."
+            )
+
+            setup_type = (
+                "BULLISH_PULLBACK_FORMING"
+            )
+
+            signal_status = "WAIT_BUY"
+
+        elif status["bear_phase"] == "TRACKING_LOW":
+
+            info = (
+                "Bearish trend detected. "
+                "Waiting for pullback confirmation."
+            )
+
+            setup_type = (
+                "BEARISH_PULLBACK_FORMING"
+            )
+
+            signal_status = "WAIT_SELL"
+
+        else:
+
+            info = (
+                "No active breakout-pullback setup."
+            )
+
+            setup_type = "NO_SETUP"
+
+            signal_status = "NEUTRAL"
+
+        response.update({
+
+            "setup_type":
+                setup_type,
+
+            "signal":
+                signal_status,
+
+            "info":
+                info,
+
+            "key_level":
+                None,
+
+            "stop_loss":
+                None,
+
+            "take_profit":
+                None,
+
+            "risk_reward":
+                None
         })
 
-    return base_response
+    return response
 
+
+# ================================================================
+# HEALTH CHECK
+# ================================================================
 
 @app.get("/")
 def home():
-    return {"message": "EMA50 Breakout + Pullback Strategy API (state-machine version) running successfully"}
+
+    return {
+        "message":
+            "EMA50 Breakout + Pullback Strategy API running successfully",
+
+        "version":
+            "2.0"
+    }
