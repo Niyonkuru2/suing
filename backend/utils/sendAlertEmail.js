@@ -2,7 +2,7 @@ export const marketSignalEmailTemplate = (
   symbol,
   signal,
   timeframe,
-  lastClose,
+  entry_price,
   stopLoss,
   takeProfit,
   timestamp,
@@ -150,7 +150,7 @@ export const marketSignalEmailTemplate = (
       </div>
 
       <table class="table">
-        <tr><th>Entry Price:</th><td><strong>${lastClose}</strong></td></tr>
+        <tr><th>Entry Price:</th><td><strong>${entry_price}</strong></td></tr>
         <tr><th>Key Breakout Level:</th><td>${keyLevel || "N/A"}</td></tr>
         <tr><th>EMA50:</th><td>${ema50 || "N/A"}</td></tr>
         <tr><th>Stop Loss:</th><td><strong style="color: ${signal === "BUY" ? "#dc3545" : "#28a745"}">${stopLoss}</strong></td></tr>
