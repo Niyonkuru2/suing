@@ -1,10 +1,3 @@
-// Professional market signal email template
-// Table-based layout (works reliably in Outlook/Gmail/Apple Mail, unlike flex/div-heavy markup)
-//
-// Backwards compatible: existing calls with the original 10 args still work.
-// Two new OPTIONAL trailing args added: candlesSinceSignal, signalDatetime
-// (pass undefined/null if you don't have them yet).
-
 export const marketSignalEmailTemplate = (
   symbol,
   signal,
