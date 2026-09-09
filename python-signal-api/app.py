@@ -52,9 +52,14 @@ def run_strategy(df: pd.DataFrame):
     bear_pullback_count = 0
     bear_pullback_high = None    # highest high seen during the pullback (for SL)
 
+    # We keep the MOST RECENT signal found anywhere in the series (not only
+    # if it happens to land exactly on the final bar). We also record how
+    # many bars ago it fired, and its timestamp/index, so the caller can
+    # decide freshness and avoid re-alerting on an old, already-seen signal.
     last_signal = None
     last_key_level = None
     last_pullback_extreme = None
+    last_signal_bar_index = None
 
     for i in range(1, n):
         prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1]
@@ -73,6 +78,9 @@ def run_strategy(df: pd.DataFrame):
             bull_pullback_count = 0
             bull_pullback_low = None
             bear_state = "IDLE"
+            bear_pullback_count = 0
+            bear_pullback_high = None
+            bear_swing_low = None
 
         elif bull_state == "TRACKING_HIGH":
             if high > bull_swing_high:
@@ -90,20 +98,32 @@ def run_strategy(df: pd.DataFrame):
                 bull_pullback_count = 0
                 bull_pullback_low = None
             if close < ema:
-                bull_state = "IDLE"        # trend broke back down, setup invalidated
+                # trend broke back down, setup invalidated -> clear everything
+                bull_state = "IDLE"
+                bull_swing_high = None
+                bull_pullback_count = 0
+                bull_pullback_low = None
 
         elif bull_state == "ARMED":
             if is_red(row):
                 # extend pullback low tracking in case breakout hasn't happened yet
                 bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
             if close > bull_swing_high:
-                # Step 3 complete -> BUY signal on this bar
+                # Step 3 complete -> BUY signal on THIS bar (record it, keep scanning)
                 last_signal = "BUY_TREND"
                 last_key_level = bull_swing_high
                 last_pullback_extreme = bull_pullback_low
+                last_signal_bar_index = i
                 bull_state = "IDLE"        # reset, ready to look for next setup
+                bull_swing_high = None
+                bull_pullback_count = 0
+                bull_pullback_low = None
             elif close < ema:
-                bull_state = "IDLE"        # invalidated before breakout
+                # invalidated before breakout -> clear everything
+                bull_state = "IDLE"
+                bull_swing_high = None
+                bull_pullback_count = 0
+                bull_pullback_low = None
 
         # ---------------- BEARISH SETUP ----------------
         if crossed_down:
@@ -112,6 +132,9 @@ def run_strategy(df: pd.DataFrame):
             bear_pullback_count = 0
             bear_pullback_high = None
             bull_state = "IDLE"
+            bull_pullback_count = 0
+            bull_pullback_low = None
+            bull_swing_high = None
 
         elif bear_state == "TRACKING_LOW":
             if low < bear_swing_low:
@@ -128,6 +151,9 @@ def run_strategy(df: pd.DataFrame):
                 bear_pullback_high = None
             if close > ema:
                 bear_state = "IDLE"
+                bear_swing_low = None
+                bear_pullback_count = 0
+                bear_pullback_high = None
 
         elif bear_state == "ARMED":
             if is_green(row):
@@ -136,15 +162,18 @@ def run_strategy(df: pd.DataFrame):
                 last_signal = "SELL_TREND"
                 last_key_level = bear_swing_low
                 last_pullback_extreme = bear_pullback_high
+                last_signal_bar_index = i
                 bear_state = "IDLE"
+                bear_swing_low = None
+                bear_pullback_count = 0
+                bear_pullback_high = None
             elif close > ema:
                 bear_state = "IDLE"
-
-        # Only the FINAL bar's signal is the live/actionable one
-        if i < n - 1:
-            last_signal = None
-            last_key_level = None
-            last_pullback_extreme = None
+                bear_swing_low = None
+                bear_pullback_count = 0
+                bear_pullback_high = None
+    # end of loop -- last_signal now holds the MOST RECENT signal found
+    # anywhere in the series (could be the last bar, or several bars back).
 
     status = {
         "bull_phase": bull_state,
@@ -155,7 +184,12 @@ def run_strategy(df: pd.DataFrame):
         "bear_swing_low": round(bear_swing_low, 5) if bear_swing_low else None,
     }
 
-    return last_signal, last_key_level, last_pullback_extreme, status
+    candles_since_signal = (n - 1 - last_signal_bar_index) if last_signal_bar_index is not None else None
+    signal_datetime = None
+    if last_signal_bar_index is not None and 'datetime' in df.columns:
+        signal_datetime = str(df['datetime'].iloc[last_signal_bar_index])
+
+    return last_signal, last_key_level, last_pullback_extreme, status, candles_since_signal, signal_datetime
 
 
 @app.post("/analyze")
@@ -174,6 +208,18 @@ def analyze(data: MarketData):
     for col in ['open', 'high', 'low', 'close']:
         df[col] = df[col].astype(float)
 
+    # IMPORTANT: Twelve Data's most recent row can be the CURRENTLY FORMING
+    # candle (not yet closed) if you poll mid-interval. The strategy relies
+    # on a candle CLOSING beyond the EMA / swing level, so evaluating a
+    # still-forming candle as if it were closed can hide or fake signals.
+    # If your cron doesn't run exactly on the 5-min boundary, drop the last
+    # (incomplete) row here. Uncomment if needed:
+    #
+    # from datetime import datetime, timezone
+    # last_ts = pd.to_datetime(df['datetime'].iloc[-1])
+    # if (datetime.now(timezone.utc) - last_ts.tz_localize('UTC')).total_seconds() < 300:
+    #     df = df.iloc[:-1]
+
     df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
     df = df.dropna(subset=['ema50']).reset_index(drop=True)
 
@@ -181,7 +227,7 @@ def analyze(data: MarketData):
         return {"error": "Not enough data after EMA50 warm-up"}
 
     latest = df.iloc[-1]
-    signal, key_level, pullback_extreme, status = run_strategy(df)
+    signal, key_level, pullback_extreme, status, candles_since_signal, signal_datetime = run_strategy(df)
 
     base_response = {
         "symbol": data.symbol,
@@ -189,6 +235,8 @@ def analyze(data: MarketData):
         "entry_price": round(latest['close'], 5),
         "ema50": round(latest['ema50'], 5),
         "status": status,   # <-- always shows WHY it's neutral, if it is
+        "candles_since_signal": candles_since_signal,  # 0 = just fired on latest closed candle
+        "signal_datetime": signal_datetime,            # timestamp of the candle that triggered it
     }
 
     if signal == "BUY_TREND":
