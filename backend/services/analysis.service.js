@@ -140,18 +140,18 @@ const runPythonAnalysis = async (marketData, symbol, timeframe) => {
 export const autoAnalyzeMarket = async () => {
   // Timeframes optimized for pullback strategy
   const pairs = [
-    { symbol: "EUR/USD", timeframe: "5min"},
-    { symbol: "GBP/USD", timeframe: "5min"},
-    { symbol: "USD/JPY", timeframe: "5min"},
-    //{ symbol: "USD/CHF", timeframe: "1h" },
-    //{ symbol: "NZD/USD", timeframe: "1h" },
-    //{ symbol: "USD/CAD", timeframe: "1h" },
-    //{ symbol: "AUD/USD", timeframe: "1h" },
-    //{ symbol: "EUR/GBP", timeframe: "1h" },
-    //{ symbol: "GBP/JPY", timeframe: "1h" },
-    //{ symbol: "EUR/JPY", timeframe: "1h" },
-    //{ symbol: "AUD/JPY", timeframe: "1h" },
-    //{ symbol: "NZD/JPY", timeframe: "1h" },
+    { symbol: "EUR/USD", timeframe: "1h"},
+    { symbol: "GBP/USD", timeframe: "1h"},
+    { symbol: "USD/JPY", timeframe: "1h"},
+    { symbol: "USD/CAD", timeframe: "1h" },
+    { symbol: "USD/CHF", timeframe: "1h" },
+    { symbol: "NZD/USD", timeframe: "1h" },
+    { symbol: "AUD/USD", timeframe: "1h" },
+    { symbol: "EUR/GBP", timeframe: "1h" },
+    { symbol: "GBP/JPY", timeframe: "1h" },
+    { symbol: "XAUUSD", timeframe: "1h" },
+     { symbol: "AUD/CAD", timeframe: "1h" },
+    { symbol: "AUD/CHF", timeframe: "1h" },
   ];
   
   console.log(`🚀 Starting auto-analysis for ${pairs.length} pairs...`);
