@@ -1,3 +1,10 @@
+// Professional market signal email template
+// Table-based layout (works reliably in Outlook/Gmail/Apple Mail, unlike flex/div-heavy markup)
+//
+// Backwards compatible: existing calls with the original 10 args still work.
+// Two new OPTIONAL trailing args added: candlesSinceSignal, signalDatetime
+// (pass undefined/null if you don't have them yet).
+
 export const marketSignalEmailTemplate = (
   symbol,
   signal,
@@ -8,169 +15,165 @@ export const marketSignalEmailTemplate = (
   timestamp,
   setupType,
   keyLevel,
-  ema50
-) => `
+  ema50,
+  candlesSinceSignal = null,
+  signalDatetime = null
+) => {
+  const isBuy = signal === "BUY";
+  const accent = isBuy ? "#0f9d58" : "#d93025";
+  const accentSoft = isBuy ? "#e6f4ea" : "#fce8e6";
+  const navy = "#0b1f3a";
+
+  const freshnessRow =
+    candlesSinceSignal !== null
+      ? `<tr>
+           <td style="padding:10px 0;color:#5f6368;font-size:13px;width:44%;border-bottom:1px solid #edf0f4;">Candles Since Trigger</td>
+           <td style="padding:10px 0;color:#1a1a1a;font-size:13px;font-weight:600;border-bottom:1px solid #edf0f4;">${candlesSinceSignal}</td>
+         </tr>`
+      : "";
+
+  const signalTimeRow = signalDatetime
+    ? `<tr>
+         <td style="padding:10px 0;color:#5f6368;font-size:13px;width:44%;border-bottom:1px solid #edf0f4;">Trigger Candle</td>
+         <td style="padding:10px 0;color:#1a1a1a;font-size:13px;font-weight:600;border-bottom:1px solid #edf0f4;">${signalDatetime}</td>
+       </tr>`
+    : "";
+
+  return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Market Signal Alert - ${signal}</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      font-family: 'Segoe UI', Arial, sans-serif;
-      background-color: #f4f4f7;
-    }
-    .container {
-      max-width: 640px;
-      margin: 40px auto;
-      background: #ffffff;
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
-    }
-    .header {
-      background: ${signal === "BUY" ? "#28a745" : "#dc3545"};
-      color: #ffffff;
-      text-align: center;
-      padding: 25px 20px;
-      font-size: 26px;
-      font-weight: 600;
-      letter-spacing: 1px;
-    }
-    .content {
-      padding: 30px 40px;
-      color: #111827;
-      font-size: 16px;
-      line-height: 1.6;
-    }
-    .highlight {
-      background-color: #f3f4f6;
-      border-radius: 8px;
-      padding: 15px 20px;
-      margin-top: 15px;
-      font-size: 15px;
-    }
-    .signal-tag {
-      display: inline-block;
-      padding: 8px 18px;
-      border-radius: 6px;
-      color: #ffffff;
-      font-weight: bold;
-      background-color: ${signal === "BUY" ? "#28a745" : "#dc3545"};
-      text-transform: uppercase;
-    }
-    .setup-tag {
-      display: inline-block;
-      padding: 4px 12px;
-      border-radius: 4px;
-      background-color: #6c757d;
-      color: #ffffff;
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      margin-left: 8px;
-    }
-    .table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 20px;
-    }
-    .table th, .table td {
-      text-align: left;
-      padding: 8px 0;
-    }
-    .table th {
-      color: #6b7280;
-      font-weight: 600;
-      width: 40%;
-    }
-    .table tr {
-      border-bottom: 1px solid #e5e7eb;
-    }
-    .table tr:last-child {
-      border-bottom: none;
-    }
-    .strategy-box {
-      background-color: #fff3cd;
-      border-left: 4px solid #ffc107;
-      padding: 12px 16px;
-      margin: 20px 0;
-      border-radius: 4px;
-      font-size: 14px;
-    }
-    .strategy-box strong {
-      color: #856404;
-    }
-    .footer {
-      text-align: center;
-      font-size: 13px;
-      color: #6b7280;
-      padding: 20px;
-      background-color: #f9fafb;
-      border-top: 1px solid #e5e7eb;
-    }
-    .risk-reward-badge {
-      display: inline-block;
-      background-color: #28a745;
-      color: white;
-      padding: 2px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-      font-weight: bold;
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="color-scheme" content="light" />
+<title>${symbol} ${signal} Signal</title>
 </head>
-<body>
-  <div class="container">
-    <div class="header">
-      ${signal} SIGNAL ALERT
-      <span class="setup-tag">Breakout + Pullback</span>
-    </div>
-    <div class="content">
-      <p>Dear Trader,</p>
-      <p>A new <strong>${signal}</strong> signal has been detected by our automated system for:</p>
-      
-      <div class="highlight">
-        <p><strong>Symbol:</strong> ${symbol}</p>
-        <p><strong>Timeframe:</strong> ${timeframe}</p>
-        <p><strong>Signal:</strong> <span class="signal-tag">${signal}</span></p>
-        <p><strong>Setup Type:</strong> ${setupType || "Breakout + Pullback"}</p>
-        <p><strong>Timestamp:</strong> ${timestamp}</p>
-      </div>
-
-      <div class="strategy-box">
-        <strong>📊 Strategy Entry Conditions:</strong><br/>
-        ${signal === "BUY" ? 
-          `✅ Price was below EMA50 → broke above → made a high → pulled back → closed above that high` :
-          `✅ Price was above EMA50 → broke below → made a low → pulled back → closed below that low`
-        }
-      </div>
-
-      <table class="table">
-        <tr><th>Entry Price:</th><td><strong>${entry_price}</strong></td></tr>
-        <tr><th>Key Breakout Level:</th><td>${keyLevel || "N/A"}</td></tr>
-        <tr><th>EMA50:</th><td>${ema50 || "N/A"}</td></tr>
-        <tr><th>Stop Loss:</th><td><strong style="color: ${signal === "BUY" ? "#dc3545" : "#28a745"}">${stopLoss}</strong></td></tr>
-        <tr><th>Take Profit:</th><td><strong style="color: ${signal === "BUY" ? "#28a745" : "#dc3545"}">${takeProfit}</strong></td></tr>
-        <tr><th>Risk:Reward:</th><td><span class="risk-reward-badge">1 : 2</span></td></tr>
-      </table>
-
-      <p style="margin-top: 20px; font-size: 14px; color: #6b7280;">
-        ⚠️ Please analyze this signal with your strategy before executing any trade.
-        <br/>
-        🎯 Recommended: Wait for confirmation before entry.
-      </p>
-    </div>
-    <div class="footer">
-      &copy; ${new Date().getFullYear()} Market Signal Bot. All rights reserved.<br/>
-      Powered by FastAPI × Node.js × Twelve Data<br/>
-      <span style="font-size: 11px; color: #9ca3af;">Strategy: EMA50 Breakout + Pullback with 1:2 RR</span>
-    </div>
+<body style="margin:0;padding:0;background-color:#eef1f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <!-- preheader (hidden preview text) -->
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+    ${symbol} ${signal} signal on ${timeframe} — entry ${entry_price}, SL ${stopLoss}, TP ${takeProfit}
   </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef1f5;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:${navy};padding:28px 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="color:#ffffff;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;opacity:0.65;">
+                    Market Signal Bot
+                  </td>
+                  <td align="right" style="color:#ffffff;font-size:12px;opacity:0.65;">
+                    ${timeframe}
+                  </td>
+                </tr>
+              </table>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
+                <tr>
+                  <td style="vertical-align:middle;">
+                    <span style="display:inline-block;background-color:${accent};color:#ffffff;font-size:13px;font-weight:700;letter-spacing:0.5px;padding:6px 14px;border-radius:20px;text-transform:uppercase;">
+                      ${signal}
+                    </span>
+                    <span style="color:#ffffff;font-size:22px;font-weight:600;margin-left:12px;">
+                      ${symbol}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:28px 32px 8px 32px;">
+              <p style="margin:0 0 4px 0;color:#5f6368;font-size:13px;">Setup detected</p>
+              <p style="margin:0 0 20px 0;color:#1a1a1a;font-size:15px;font-weight:600;">
+                ${setupType || "EMA50 Breakout + Pullback"}
+              </p>
+
+              <!-- Strategy explanation -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${accentSoft};border-radius:8px;margin-bottom:24px;">
+                <tr>
+                  <td style="padding:14px 16px;color:#1a1a1a;font-size:13px;line-height:1.55;">
+                    ${
+                      isBuy
+                        ? "Price closed above the 50 EMA, pulled back with two red candles, then closed back above the pre-pullback swing high."
+                        : "Price closed below the 50 EMA, pulled back with two green candles, then closed back below the pre-pullback swing low."
+                    }
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Key numbers -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;">
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;width:44%;border-bottom:1px solid #edf0f4;">Entry Price</td>
+                  <td style="padding:10px 0;color:#1a1a1a;font-size:14px;font-weight:700;border-bottom:1px solid #edf0f4;">${entry_price}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;border-bottom:1px solid #edf0f4;">Key Level</td>
+                  <td style="padding:10px 0;color:#1a1a1a;font-size:14px;border-bottom:1px solid #edf0f4;">${keyLevel || "N/A"}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;border-bottom:1px solid #edf0f4;">EMA50</td>
+                  <td style="padding:10px 0;color:#1a1a1a;font-size:14px;border-bottom:1px solid #edf0f4;">${ema50 || "N/A"}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;border-bottom:1px solid #edf0f4;">Stop Loss</td>
+                  <td style="padding:10px 0;color:#d93025;font-size:14px;font-weight:700;border-bottom:1px solid #edf0f4;">${stopLoss}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;border-bottom:1px solid #edf0f4;">Take Profit</td>
+                  <td style="padding:10px 0;color:#0f9d58;font-size:14px;font-weight:700;border-bottom:1px solid #edf0f4;">${takeProfit}</td>
+                </tr>
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;border-bottom:1px solid #edf0f4;">Risk : Reward</td>
+                  <td style="padding:10px 0;border-bottom:1px solid #edf0f4;">
+                    <span style="display:inline-block;background-color:#eef1f5;color:#1a1a1a;font-size:12px;font-weight:700;padding:3px 10px;border-radius:10px;">1 : 2</span>
+                  </td>
+                </tr>
+                ${freshnessRow}
+                ${signalTimeRow}
+                <tr>
+                  <td style="padding:10px 0;color:#5f6368;font-size:13px;">Detected At</td>
+                  <td style="padding:10px 0;color:#1a1a1a;font-size:13px;">${timestamp}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Disclaimer -->
+          <tr>
+            <td style="padding:0 32px 28px 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fff8e1;border-radius:8px;">
+                <tr>
+                  <td style="padding:12px 16px;color:#7a5c00;font-size:12.5px;line-height:1.5;">
+                    ⚠️ This is an automated technical alert, not financial advice. Confirm the setup on your own chart and manage risk before entering any trade.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:18px 32px;background-color:#f7f8fa;border-top:1px solid #edf0f4;">
+              <p style="margin:0;color:#9aa0a6;font-size:11.5px;text-align:center;line-height:1.6;">
+                &copy; ${new Date().getFullYear()} Market Signal Bot &nbsp;·&nbsp; EMA50 Breakout + Pullback Strategy &nbsp;·&nbsp; 1:2 RR<br/>
+                Powered by FastAPI × Node.js × Twelve Data
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>
 `;
-
+};
