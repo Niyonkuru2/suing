@@ -18,7 +18,6 @@ export const performAnalysis = async (symbol, timeframe) => {
     const response = await axios.get(url);
 
     console.log("📥 Twelve Data status:", response.status);
-    console.log("📥 Twelve Data response:", response.data);
 
     if (response.data.status === "error") {
       throw new Error(
