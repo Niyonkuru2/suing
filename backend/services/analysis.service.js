@@ -50,7 +50,7 @@ export const performAnalysis = async (symbol, timeframe) => {
         result.symbol,
         result.signal,
         result.timeframe,
-        result.entry,
+        result.entry_price,
         result.stop_loss,
         result.take_profit,
         timestamp,
