@@ -1,235 +1,631 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import Optional
 import pandas as pd
-from ta.trend import EMAIndicator
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-app = FastAPI(title="EMA50 Breakout + Pullback Strategy API")
 
+app = FastAPI(
+    title="New York 4H Range Breakout + Re-entry Strategy API"
+)
+
+
+# ================================================================
+# Configuration
+# ================================================================
+
+NY_TZ = ZoneInfo("America/New_York")
+RISK_REWARD = 2.0
+
+
+# ================================================================
+# Request model
+# ================================================================
 
 class MarketData(BaseModel):
-    values: list          # list of dicts with open/high/low/close (newest first)
+    values: list
     symbol: str
     timeframe: str
 
 
-# ------------------------------------------------------------------
+# ================================================================
 # Candle helpers
-# ------------------------------------------------------------------
+# ================================================================
+
 def is_red(row):
-    return row['close'] < row['open']
+    return row["close"] < row["open"]
 
 
 def is_green(row):
-    return row['close'] > row['open']
+    return row["close"] > row["open"]
 
 
-# ------------------------------------------------------------------
-# Core state machine
-# ------------------------------------------------------------------
+# ================================================================
+# Time handling
+# ================================================================
+
+def convert_to_new_york(series):
+    """
+    Convert timestamps to America/New_York.
+
+    Supports:
+    - ISO timestamps with timezone
+    - Unix timestamps in seconds
+    - Unix timestamps in milliseconds
+    """
+
+    # Try normal datetime parsing first
+    parsed = pd.to_datetime(series, errors="coerce", utc=True)
+
+    # If parsing failed for numeric timestamps, try numeric conversion
+    failed = parsed.isna()
+
+    if failed.any():
+        numeric = pd.to_numeric(series[failed], errors="coerce")
+
+        # Determine seconds vs milliseconds
+        parsed_numeric = pd.to_datetime(
+            numeric,
+            unit="ms",
+            errors="coerce",
+            utc=True
+        )
+
+        # Try seconds for values that didn't work
+        still_failed = parsed_numeric.isna()
+
+        if still_failed.any():
+            parsed_seconds = pd.to_datetime(
+                numeric[still_failed],
+                unit="s",
+                errors="coerce",
+                utc=True
+            )
+
+            parsed_numeric.loc[still_failed] = parsed_seconds
+
+        parsed.loc[failed] = parsed_numeric
+
+    return parsed.dt.tz_convert(NY_TZ)
+
+
+# ================================================================
+# Find today's first New York 4H candle
+# ================================================================
+
+def find_new_york_range(df):
+    """
+    Finds the first 4H candle of the New York trading day.
+
+    Expected candle:
+        00:00 -> 04:00 New York
+
+    Returns:
+        range_high
+        range_low
+        range_start
+        range_end
+    """
+
+    if "time" not in df.columns:
+        return None
+
+    df = df.copy()
+
+    df["ny_time"] = convert_to_new_york(df["time"])
+
+    if df["ny_time"].isna().all():
+        return None
+
+    latest_ny = df["ny_time"].iloc[-1]
+    current_date = latest_ny.date()
+
+    # Find today's 00:00 candle
+    candidates = df[
+        (df["ny_time"].dt.date == current_date)
+        & (df["ny_time"].dt.hour == 0)
+        & (df["ny_time"].dt.minute == 0)
+    ]
+
+    if candidates.empty:
+        return None
+
+    # There should normally be exactly one
+    range_candle = candidates.iloc[0]
+
+    range_start = range_candle["ny_time"]
+    range_end = range_start + pd.Timedelta(hours=4)
+
+    # Make sure this is actually the first 4H candle
+    if range_start.hour != 0:
+        return None
+
+    return {
+        "high": float(range_candle["high"]),
+        "low": float(range_candle["low"]),
+        "start": range_start,
+        "end": range_end,
+    }
+
+
+# ================================================================
+# Core strategy
+# ================================================================
+
 def run_strategy(df: pd.DataFrame):
     """
-    Walks the dataframe bar by bar and tracks a bullish and a bearish
-    setup independently. Returns:
-        signal        -> "BUY_TREND" / "SELL_TREND" / None
-        key_level     -> the swing high/low used as the entry trigger
-        pullback_low_high -> extreme reached during pullback (for stop loss)
-        status        -> dict describing current phase of BOTH setups
-                          (useful for debugging / alerting on "no trade yet")
-    Only a signal on the LATEST bar is reported as an actionable alert;
-    everything else is exposed via `status` so you can see progress.
+    New York 4H Range Breakout + Re-entry strategy.
+
+    Rules:
+
+    1. Identify the first 4H New York candle:
+           00:00 - 04:00 New York
+
+    2. After that candle closes:
+           range_high = high
+           range_low  = low
+
+    3. SHORT:
+           A 5m candle must CLOSE above range_high.
+           Then a later 5m candle must CLOSE back below range_high.
+           Entry = re-entry candle close.
+           SL = highest high reached after breakout.
+           TP = 2R.
+
+    4. LONG:
+           A 5m candle must CLOSE below range_low.
+           Then a later 5m candle must CLOSE back above range_low.
+           Entry = re-entry candle close.
+           SL = lowest low reached after breakout.
+           TP = 2R.
+
+    5. Wick-only breaks do NOT count.
+
+    6. Only a signal on the latest candle is actionable.
     """
-    n = len(df)
 
-    # bullish setup state
-    bull_state = "IDLE"          # IDLE -> TRACKING_HIGH -> ARMED
-    bull_swing_high = None
-    bull_pullback_count = 0
-    bull_pullback_low = None     # lowest low seen during the pullback (for SL)
+    if len(df) < 2:
+        return None, None, None, None, {
+            "phase": "WAITING",
+            "info": "Not enough candles"
+        }
 
-    # bearish setup state
-    bear_state = "IDLE"
-    bear_swing_low = None
-    bear_pullback_count = 0
-    bear_pullback_high = None    # highest high seen during the pullback (for SL)
+    df = df.copy()
+
+    # ------------------------------------------------------------
+    # Validate time
+    # ------------------------------------------------------------
+
+    if "time" not in df.columns:
+        return None, None, None, None, {
+            "phase": "ERROR",
+            "info": "Missing 'time' field. Timestamp is required."
+        }
+
+    df["ny_time"] = convert_to_new_york(df["time"])
+
+    if df["ny_time"].isna().any():
+        return None, None, None, None, {
+            "phase": "ERROR",
+            "info": "Invalid timestamp found in market data."
+        }
+
+    # ------------------------------------------------------------
+    # Get today's range
+    # ------------------------------------------------------------
+
+    range_info = find_new_york_range(df)
+
+    if range_info is None:
+        return None, None, None, None, {
+            "phase": "WAITING_FOR_4H",
+            "info": "Today's 00:00 New York 4H candle was not found yet."
+        }
+
+    range_high = range_info["high"]
+    range_low = range_info["low"]
+    range_start = range_info["start"]
+    range_end = range_info["end"]
+
+    # ------------------------------------------------------------
+    # 4H candle must be closed before trading
+    # ------------------------------------------------------------
+
+    latest_time = df["ny_time"].iloc[-1]
+
+    if latest_time < range_end:
+        return None, None, None, None, {
+            "phase": "WAITING_FOR_4H_CLOSE",
+            "range_high": round(range_high, 5),
+            "range_low": round(range_low, 5),
+            "range_start": str(range_start),
+            "range_end": str(range_end),
+            "info": "Waiting for the first New York 4H candle to close."
+        }
+
+    # ------------------------------------------------------------
+    # Only candles AFTER the 4H range
+    # ------------------------------------------------------------
+
+    trading_df = df[
+        df["ny_time"] >= range_end
+    ].copy()
+
+    if trading_df.empty:
+        return None, None, None, None, {
+            "phase": "WAITING_FOR_5M",
+            "range_high": round(range_high, 5),
+            "range_low": round(range_low, 5),
+            "info": "4H range confirmed. Waiting for 5M breakout."
+        }
+
+    # ============================================================
+    # State
+    # ============================================================
+
+    short_breakout = False
+    short_breakout_extreme = None
+    short_breakout_time = None
+
+    long_breakout = False
+    long_breakout_extreme = None
+    long_breakout_time = None
 
     last_signal = None
     last_key_level = None
-    last_pullback_extreme = None
+    last_breakout_extreme = None
 
-    for i in range(1, n):
-        prev_close, prev_ema = df['close'].iloc[i - 1], df['ema50'].iloc[i - 1]
-        close, ema = df['close'].iloc[i], df['ema50'].iloc[i]
-        high, low = df['high'].iloc[i], df['low'].iloc[i]
-        row = df.iloc[i]
+    # ============================================================
+    # Walk through 5M candles
+    # ============================================================
 
-        crossed_up = prev_close < prev_ema and close > ema
-        crossed_down = prev_close > prev_ema and close < ema
+    for i in range(len(trading_df)):
 
-        # ---------------- BULLISH SETUP ----------------
-        if crossed_up:
-            # Step 1 complete -> start tracking swing high, cancel any bearish setup
-            bull_state = "TRACKING_HIGH"
-            bull_swing_high = high
-            bull_pullback_count = 0
-            bull_pullback_low = None
-            bear_state = "IDLE"
+        row = trading_df.iloc[i]
 
-        elif bull_state == "TRACKING_HIGH":
-            if high > bull_swing_high:
-                # still making new highs, pullback hasn't started
-                bull_swing_high = high
-                bull_pullback_count = 0
-                bull_pullback_low = None
-            elif is_red(row):
-                bull_pullback_count += 1
-                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
-                if bull_pullback_count >= 2:
-                    bull_state = "ARMED"   # Step 2 complete
-            else:
-                # green candle before pullback confirmed -> not consecutive, reset count
-                bull_pullback_count = 0
-                bull_pullback_low = None
-            if close < ema:
-                bull_state = "IDLE"        # trend broke back down, setup invalidated
+        close = float(row["close"])
+        high = float(row["high"])
+        low = float(row["low"])
 
-        elif bull_state == "ARMED":
-            if is_red(row):
-                # extend pullback low tracking in case breakout hasn't happened yet
-                bull_pullback_low = low if bull_pullback_low is None else min(bull_pullback_low, low)
-            if close > bull_swing_high:
-                # Step 3 complete -> BUY signal on this bar
-                last_signal = "BUY_TREND"
-                last_key_level = bull_swing_high
-                last_pullback_extreme = bull_pullback_low
-                bull_state = "IDLE"        # reset, ready to look for next setup
-            elif close < ema:
-                bull_state = "IDLE"        # invalidated before breakout
+        current_time = row["ny_time"]
 
-        # ---------------- BEARISH SETUP ----------------
-        if crossed_down:
-            bear_state = "TRACKING_LOW"
-            bear_swing_low = low
-            bear_pullback_count = 0
-            bear_pullback_high = None
-            bull_state = "IDLE"
+        # --------------------------------------------------------
+        # SHORT SETUP
+        #
+        # Break ABOVE range high
+        # --------------------------------------------------------
 
-        elif bear_state == "TRACKING_LOW":
-            if low < bear_swing_low:
-                bear_swing_low = low
-                bear_pullback_count = 0
-                bear_pullback_high = None
-            elif is_green(row):
-                bear_pullback_count += 1
-                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
-                if bear_pullback_count >= 2:
-                    bear_state = "ARMED"
-            else:
-                bear_pullback_count = 0
-                bear_pullback_high = None
-            if close > ema:
-                bear_state = "IDLE"
+        if not short_breakout:
 
-        elif bear_state == "ARMED":
-            if is_green(row):
-                bear_pullback_high = high if bear_pullback_high is None else max(bear_pullback_high, high)
-            if close < bear_swing_low:
-                last_signal = "SELL_TREND"
-                last_key_level = bear_swing_low
-                last_pullback_extreme = bear_pullback_high
-                bear_state = "IDLE"
-            elif close > ema:
-                bear_state = "IDLE"
+            if close > range_high:
 
-        # Only the FINAL bar's signal is the live/actionable one
-        if i < n - 1:
-            last_signal = None
-            last_key_level = None
-            last_pullback_extreme = None
+                short_breakout = True
+                short_breakout_extreme = high
+                short_breakout_time = current_time
 
-    status = {
-        "bull_phase": bull_state,
-        "bull_pullback_candles": bull_pullback_count,
-        "bull_swing_high": round(bull_swing_high, 5) if bull_swing_high else None,
-        "bear_phase": bear_state,
-        "bear_pullback_candles": bear_pullback_count,
-        "bear_swing_low": round(bear_swing_low, 5) if bear_swing_low else None,
-    }
+        else:
 
-    return last_signal, last_key_level, last_pullback_extreme, status
+            # Track highest high since breakout
+            short_breakout_extreme = max(
+                short_breakout_extreme,
+                high
+            )
 
+            # Re-entry inside range
+            if close < range_high:
+
+                last_signal = "SELL"
+                last_key_level = range_high
+                last_breakout_extreme = short_breakout_extreme
+
+                # Reset short setup after trade
+                short_breakout = False
+                short_breakout_extreme = None
+                short_breakout_time = None
+
+                # Only latest bar is actionable
+                if i == len(trading_df) - 1:
+
+                    entry = close
+                    stop_loss = last_breakout_extreme
+                    risk = stop_loss - entry
+
+                    if risk > 0:
+
+                        take_profit = entry - (
+                            risk * RISK_REWARD
+                        )
+
+                        return (
+                            last_signal,
+                            last_key_level,
+                            stop_loss,
+                            take_profit,
+                            {
+                                "phase": "SHORT_ENTRY",
+                                "range_high": round(range_high, 5),
+                                "range_low": round(range_low, 5),
+                                "breakout_time": str(short_breakout_time),
+                                "entry_time": str(current_time),
+                                "entry_price": round(entry, 5),
+                                "breakout_extreme": round(
+                                    last_breakout_extreme, 5
+                                ),
+                                "risk": round(risk, 5),
+                            }
+                        )
+
+        # --------------------------------------------------------
+        # LONG SETUP
+        #
+        # Break BELOW range low
+        # --------------------------------------------------------
+
+        if not long_breakout:
+
+            if close < range_low:
+
+                long_breakout = True
+                long_breakout_extreme = low
+                long_breakout_time = current_time
+
+        else:
+
+            # Track lowest low since breakout
+            long_breakout_extreme = min(
+                long_breakout_extreme,
+                low
+            )
+
+            # Re-entry inside range
+            if close > range_low:
+
+                last_signal = "BUY"
+                last_key_level = range_low
+                last_breakout_extreme = long_breakout_extreme
+
+                long_breakout = False
+                long_breakout_extreme = None
+                long_breakout_time = None
+
+                # Only latest bar is actionable
+                if i == len(trading_df) - 1:
+
+                    entry = close
+                    stop_loss = last_breakout_extreme
+                    risk = entry - stop_loss
+
+                    if risk > 0:
+
+                        take_profit = entry + (
+                            risk * RISK_REWARD
+                        )
+
+                        return (
+                            last_signal,
+                            last_key_level,
+                            stop_loss,
+                            take_profit,
+                            {
+                                "phase": "LONG_ENTRY",
+                                "range_high": round(range_high, 5),
+                                "range_low": round(range_low, 5),
+                                "breakout_time": str(long_breakout_time),
+                                "entry_time": str(current_time),
+                                "entry_price": round(entry, 5),
+                                "breakout_extreme": round(
+                                    last_breakout_extreme, 5
+                                ),
+                                "risk": round(risk, 5),
+                            }
+                        )
+
+    # ============================================================
+    # No signal on latest candle
+    # ============================================================
+
+    phase = "WAITING"
+
+    if short_breakout and long_breakout:
+        phase = "BOTH_BREAKOUTS_ACTIVE"
+
+    elif short_breakout:
+        phase = "SHORT_BREAKOUT_ACTIVE"
+
+    elif long_breakout:
+        phase = "LONG_BREAKOUT_ACTIVE"
+
+    else:
+        phase = "WAITING_FOR_BREAKOUT"
+
+    return (
+        None,
+        None,
+        None,
+        None,
+        {
+            "phase": phase,
+            "range_high": round(range_high, 5),
+            "range_low": round(range_low, 5),
+
+            "short_breakout": short_breakout,
+            "short_breakout_extreme": (
+                round(short_breakout_extreme, 5)
+                if short_breakout_extreme is not None
+                else None
+            ),
+
+            "long_breakout": long_breakout,
+            "long_breakout_extreme": (
+                round(long_breakout_extreme, 5)
+                if long_breakout_extreme is not None
+                else None
+            ),
+
+            "range_start": str(range_start),
+            "range_end": str(range_end),
+
+            "latest_candle_ny": str(latest_time),
+
+            "info": (
+                "No re-entry signal on the latest 5M candle."
+            )
+        }
+    )
+
+
+# ================================================================
+# API endpoint
+# ================================================================
 
 @app.post("/analyze")
 def analyze(data: MarketData):
+
     df = pd.DataFrame(data.values)
 
-    if not all(col in df.columns for col in ['open', 'high', 'low', 'close']):
-        return {"error": "Missing OHLC data"}
+    # ------------------------------------------------------------
+    # Validate OHLC
+    # ------------------------------------------------------------
 
-    if len(df) < 60:
-        return {"error": "Not enough data (need at least 60 candles for EMA50 warm-up + history)"}
+    required_columns = [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]
 
-    # Incoming data assumed newest-first -> flip so latest candle is last
+    if not all(col in df.columns for col in required_columns):
+
+        return {
+            "error": (
+                "Missing OHLC data. Required: "
+                "open, high, low, close"
+            )
+        }
+
+    # ------------------------------------------------------------
+    # Timestamp required
+    # ------------------------------------------------------------
+
+    if "time" not in df.columns:
+
+        return {
+            "error": (
+                "Missing 'time' field. "
+                "Timestamp is required to identify "
+                "the New York 4H range."
+            )
+        }
+
+    if len(df) < 10:
+
+        return {
+            "error": "Not enough market data."
+        }
+
+    # ------------------------------------------------------------
+    # Incoming data is newest-first
+    # Flip it so oldest candle comes first.
+    # ------------------------------------------------------------
+
     df = df.iloc[::-1].reset_index(drop=True)
 
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
+    # ------------------------------------------------------------
+    # Convert OHLC
+    # ------------------------------------------------------------
 
-    df['ema50'] = EMAIndicator(close=df['close'], window=50).ema_indicator()
-    df = df.dropna(subset=['ema50']).reset_index(drop=True)
+    for col in required_columns:
 
-    if len(df) < 5:
-        return {"error": "Not enough data after EMA50 warm-up"}
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    if df[required_columns].isna().any().any():
+
+        return {
+            "error": "Invalid OHLC values found."
+        }
+
+    # ------------------------------------------------------------
+    # Run strategy
+    # ------------------------------------------------------------
+
+    (
+        signal,
+        key_level,
+        stop_loss,
+        take_profit,
+        status
+    ) = run_strategy(df)
 
     latest = df.iloc[-1]
-    signal, key_level, pullback_extreme, status = run_strategy(df)
 
-    base_response = {
+    entry_price = float(latest["close"])
+
+    # ------------------------------------------------------------
+    # Base response
+    # ------------------------------------------------------------
+
+    response = {
         "symbol": data.symbol,
         "timeframe": data.timeframe,
-        "entry_price": round(latest['close'], 5),
-        "ema50": round(latest['ema50'], 5),
-        "status": status,   # <-- always shows WHY it's neutral, if it is
+
+        "entry_price": round(entry_price, 5),
+
+        "signal": signal if signal else "NEUTRAL",
+
+        "setup_type": (
+            "NEW_YORK_RANGE_BREAKOUT_REENTRY"
+            if signal
+            else "NO_SETUP"
+        ),
+
+        "key_level": (
+            round(key_level, 5)
+            if key_level is not None
+            else None
+        ),
+
+        "stop_loss": (
+            round(stop_loss, 5)
+            if stop_loss is not None
+            else None
+        ),
+
+        "take_profit": (
+            round(take_profit, 5)
+            if take_profit is not None
+            else None
+        ),
+
+        "risk_reward": (
+            "1:2"
+            if signal
+            else None
+        ),
+
+        "status": status
     }
 
-    if signal == "BUY_TREND":
-        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 0.99
-        risk = latest['close'] - stop_loss
-        take_profit = latest['close'] + (risk * 2)
-        base_response.update({
-            "setup_type": "BREAKOUT_PULLBACK_BUY",
-            "signal": "BUY",
-            "key_level": round(key_level, 5),
-            "stop_loss": round(stop_loss, 5),
-            "take_profit": round(take_profit, 5),
-            "risk_reward": "1:2",
-        })
+    return response
 
-    elif signal == "SELL_TREND":
-        stop_loss = pullback_extreme if pullback_extreme is not None else latest['close'] * 1.01
-        risk = stop_loss - latest['close']
-        take_profit = latest['close'] - (risk * 2)
-        base_response.update({
-            "setup_type": "BREAKOUT_PULLBACK_SELL",
-            "signal": "SELL",
-            "key_level": round(key_level, 5),
-            "stop_loss": round(stop_loss, 5),
-            "take_profit": round(take_profit, 5),
-            "risk_reward": "1:2",
-        })
 
-    else:
-        base_response.update({
-            "setup_type": "NO_SETUP",
-            "signal": "NEUTRAL",
-            "info": "No entry trigger on the latest candle yet — see 'status' for current phase.",
-            "key_level": None,
-            "stop_loss": None,
-            "take_profit": None,
-        })
-
-    return base_response
-
+# ================================================================
+# Health check
+# ================================================================
 
 @app.get("/")
 def home():
-    return {"message": "EMA50 Breakout + Pullback Strategy API running successfully"}
+
+    return {
+        "message": (
+            "New York 4H Range Breakout + "
+            "5M Re-entry Strategy API running successfully"
+        ),
+        "timezone": "America/New_York",
+        "range": "00:00 - 04:00 New York",
+        "entry_timeframe": "5m",
+        "risk_reward": "1:2"
+    }
