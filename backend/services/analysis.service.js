@@ -179,12 +179,12 @@ export const autoAnalyzeMarket = async () => {
     { symbol: "USD/CAD", timeframe: "1h" },
     { symbol: "USD/CHF", timeframe: "1h" },
     { symbol: "NZD/USD", timeframe: "1h" },
-    { symbol: "AUD/USD", timeframe: "1h" },
-    { symbol: "EUR/GBP", timeframe: "1h" },
-    { symbol: "GBP/JPY", timeframe: "1h" },
-    { symbol: "XAU/USD", timeframe: "1h" },
-    { symbol: "AUD/CAD", timeframe: "1h" },
-    { symbol: "AUD/CHF", timeframe: "1h" },
+     { symbol: "XAU/USD", timeframe: "1h" },
+    //{ symbol: "AUD/USD", timeframe: "1h" },
+    //{ symbol: "EUR/GBP", timeframe: "1h" },
+    //{ symbol: "GBP/JPY", timeframe: "1h" },
+    //{ symbol: "AUD/CAD", timeframe: "1h" },
+    //{ symbol: "AUD/CHF", timeframe: "1h" },
   ];
 
   console.log(`🚀 Starting auto-analysis for ${pairs.length} pairs...`);
