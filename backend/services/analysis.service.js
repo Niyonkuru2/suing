@@ -182,7 +182,7 @@ export const autoAnalyzeMarket = async () => {
     { symbol: "AUD/USD", timeframe: "1h" },
     { symbol: "EUR/GBP", timeframe: "1h" },
     { symbol: "GBP/JPY", timeframe: "1h" },
-    { symbol: "XAUUSD", timeframe: "1h" },
+    { symbol: "XAU/USD", timeframe: "1h" },
     { symbol: "AUD/CAD", timeframe: "1h" },
     { symbol: "AUD/CHF", timeframe: "1h" },
   ];
