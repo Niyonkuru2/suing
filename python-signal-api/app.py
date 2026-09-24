@@ -6,7 +6,7 @@ from ta.volatility import AverageTrueRange
 
 
 app = FastAPI(
-    title="50 EMA Pullback Analysis Strategy API"
+    title="25/50/100 EMA Pullback Strategy API"
 )
 
 
@@ -14,74 +14,26 @@ app = FastAPI(
 # CONFIGURATION
 # ================================================================
 
-EMA_PERIOD = 50
+EMA_FAST = 25
+EMA_MID = 50
+EMA_SLOW = 100
 ATR_PERIOD = 14
 
+# Price may come this many ATRs away from EMA50 and still
+# be considered an EMA50 pullback/touch.
+EMA50_TOUCH_ATR_TOLERANCE = 0.30
 
-# ------------------------------------------------
-# Pullback requirements
-# ------------------------------------------------
+# Rejection candle requirements.
+# Example: wick >= 1.0 x body.
+MIN_REJECTION_WICK_BODY_RATIO = 1.0
 
-MIN_PULLBACK_CANDLES = 2
-MAX_PULLBACK_CANDLES = 12
+# Where the candle must close inside its range.
+# 0.60 means bullish candle closes in the upper 40%;
+# bearish candle closes in the lower 40%.
+MIN_CLOSE_POSITION = 0.60
 
-
-# ------------------------------------------------
-# EMA interaction
-#
-# Example:
-# 0.30 ATR means price can come within
-# 0.30 ATR of EMA50.
-# ------------------------------------------------
-
-EMA_TOUCH_ATR_TOLERANCE = 0.30
-
-
-# ------------------------------------------------
-# Pullback depth
-#
-# These are not mandatory Fibonacci levels.
-# They are measurements used to classify
-# the quality of the pullback.
-# ------------------------------------------------
-
-MIN_PULLBACK_RETRACE = 0.20
-MAX_PULLBACK_RETRACE = 0.786
-
-
-# ------------------------------------------------
-# Minimum impulse size
-#
-# Prevents tiny random movements from being
-# considered an impulse.
-# ------------------------------------------------
-
-MIN_IMPULSE_ATR = 0.50
-
-
-# ------------------------------------------------
-# EMA slope
-#
-# EMA must move at least this many ATR fractions
-# over the slope lookback to be considered
-# directional.
-# ------------------------------------------------
-
-EMA_SLOPE_LOOKBACK = 5
-MIN_EMA_SLOPE_ATR = 0.02
-
-
-# ------------------------------------------------
-# Stop loss
-# ------------------------------------------------
-
+# Stop-loss / take-profit
 SL_ATR_BUFFER = 0.15
-
-
-# ------------------------------------------------
-# Reward / Risk
-# ------------------------------------------------
-
 RISK_REWARD = 2.0
 
 
@@ -90,11 +42,8 @@ RISK_REWARD = 2.0
 # ================================================================
 
 class MarketData(BaseModel):
-
     values: list
-
     symbol: str
-
     timeframe: str
 
 
@@ -103,250 +52,130 @@ class MarketData(BaseModel):
 # ================================================================
 
 def is_green(row):
-
     return row["close"] > row["open"]
 
 
 def is_red(row):
-
     return row["close"] < row["open"]
 
 
 # ================================================================
-# TREND DETECTION
+# 25 / 50 / 100 EMA TREND
 # ================================================================
 
 def get_trend(df, i):
-
     """
-    Determine the directional environment using:
+    BUY environment:
+        EMA25 > EMA50 > EMA100
 
-    1. Price relative to EMA50
-    2. EMA50 slope
+    SELL environment:
+        EMA100 > EMA50 > EMA25
 
-    Returns:
-
-        BULL
-        BEAR
+    Otherwise:
         NEUTRAL
     """
 
-    if i < EMA_SLOPE_LOOKBACK:
+    ema25 = float(df["ema25"].iloc[i])
+    ema50 = float(df["ema50"].iloc[i])
+    ema100 = float(df["ema100"].iloc[i])
 
+    if any(pd.isna(x) for x in [ema25, ema50, ema100]):
         return "NEUTRAL"
 
-
-    close = float(df["close"].iloc[i])
-    ema = float(df["ema50"].iloc[i])
-    atr = float(df["atr"].iloc[i])
-
-    previous_ema = float(
-        df["ema50"].iloc[
-            i - EMA_SLOPE_LOOKBACK
-        ]
-    )
-
-
-    if pd.isna(ema) or pd.isna(atr) or atr <= 0:
-
-        return "NEUTRAL"
-
-
-    ema_slope = ema - previous_ema
-
-    minimum_slope = (
-        atr * MIN_EMA_SLOPE_ATR
-    )
-
-
-    # ------------------------------------------------
-    # Bullish environment
-    # ------------------------------------------------
-
-    if (
-        close > ema
-        and ema_slope >= minimum_slope
-    ):
-
+    if ema25 > ema50 > ema100:
         return "BULL"
 
-
-    # ------------------------------------------------
-    # Bearish environment
-    # ------------------------------------------------
-
-    if (
-        close < ema
-        and ema_slope <= -minimum_slope
-    ):
-
+    if ema100 > ema50 > ema25:
         return "BEAR"
-
 
     return "NEUTRAL"
 
 
 # ================================================================
-# PULLBACK QUALITY
+# EMA50 PULLBACK / TOUCH
 # ================================================================
 
-def calculate_pullback_measurement(
-    impulse_start,
-    impulse_extreme,
-    pullback_extreme,
-    direction
-):
-
+def candle_touches_ema50(row, ema50, atr):
     """
-    Measures how deeply price has pulled back
-    relative to the impulse.
+    The candle must actually reach the EMA50 zone.
 
-    BUY:
-
-        impulse_start = swing low
-        impulse_extreme = impulse high
-        pullback_extreme = pullback low
-
-    SELL:
-
-        impulse_start = swing high
-        impulse_extreme = impulse low
-        pullback_extreme = pullback high
+    A candle is considered near EMA50 when the candle range
+    overlaps the EMA50 +/- ATR tolerance zone.
     """
 
-    if direction == "BULL":
-
-        impulse_range = (
-            impulse_extreme
-            - impulse_start
-        )
-
-        pullback_distance = (
-            impulse_extreme
-            - pullback_extreme
-        )
-
-
-    else:
-
-        impulse_range = (
-            impulse_start
-            - impulse_extreme
-        )
-
-        pullback_distance = (
-            pullback_extreme
-            - impulse_extreme
-        )
-
-
-    if impulse_range <= 0:
-
-        return None
-
-
-    retracement = (
-        pullback_distance
-        / impulse_range
-    )
-
-
-    return retracement
-
-
-# ================================================================
-# EMA PROXIMITY
-# ================================================================
-
-def is_near_ema(
-    price,
-    ema,
-    atr
-):
-
-    if atr <= 0:
-
+    if pd.isna(ema50) or pd.isna(atr) or atr <= 0:
         return False
 
+    tolerance = atr * EMA50_TOUCH_ATR_TOLERANCE
 
-    distance = abs(
-        price - ema
-    )
-
+    zone_low = ema50 - tolerance
+    zone_high = ema50 + tolerance
 
     return (
-        distance
-        <= atr * EMA_TOUCH_ATR_TOLERANCE
+        float(row["low"]) <= zone_high
+        and float(row["high"]) >= zone_low
     )
 
 
 # ================================================================
-# CONFIRMATION CANDLE
+# REJECTION CANDLES
 # ================================================================
 
-def bullish_confirmation(row):
-
+def bullish_rejection(row):
     """
-    Basic bullish rejection:
-
-    - Green candle
-    - Close above open
-    - Close in upper portion of candle
+    Bullish rejection:
+      - bullish/green candle
+      - meaningful lower wick
+      - close in upper part of candle
     """
 
-    candle_range = (
-        row["high"]
-        - row["low"]
-    )
+    open_price = float(row["open"])
+    high = float(row["high"])
+    low = float(row["low"])
+    close = float(row["close"])
 
+    candle_range = high - low
+    body = abs(close - open_price)
 
-    if candle_range <= 0:
-
+    if candle_range <= 0 or body <= 0:
         return False
 
-
-    close_position = (
-        row["close"]
-        - row["low"]
-    ) / candle_range
-
+    lower_wick = min(open_price, close) - low
+    close_position = (close - low) / candle_range
 
     return (
-        is_green(row)
-        and close_position >= 0.60
+        close > open_price
+        and lower_wick >= body * MIN_REJECTION_WICK_BODY_RATIO
+        and close_position >= MIN_CLOSE_POSITION
     )
 
 
-def bearish_confirmation(row):
-
+def bearish_rejection(row):
     """
-    Basic bearish rejection:
-
-    - Red candle
-    - Close below open
-    - Close in lower portion of candle
+    Bearish rejection:
+      - bearish/red candle
+      - meaningful upper wick
+      - close in lower part of candle
     """
 
-    candle_range = (
-        row["high"]
-        - row["low"]
-    )
+    open_price = float(row["open"])
+    high = float(row["high"])
+    low = float(row["low"])
+    close = float(row["close"])
 
+    candle_range = high - low
+    body = abs(close - open_price)
 
-    if candle_range <= 0:
-
+    if candle_range <= 0 or body <= 0:
         return False
 
-
-    close_position = (
-        row["high"]
-        - row["close"]
-    ) / candle_range
-
+    upper_wick = high - max(open_price, close)
+    close_position = (high - close) / candle_range
 
     return (
-        is_red(row)
-        and close_position >= 0.60
+        close < open_price
+        and upper_wick >= body * MIN_REJECTION_WICK_BODY_RATIO
+        and close_position >= MIN_CLOSE_POSITION
     )
 
 
@@ -354,875 +183,175 @@ def bearish_confirmation(row):
 # MAIN STRATEGY
 # ================================================================
 
-def run_pullback_strategy(df):
+def run_ema_pullback_strategy(df):
+    """
+    Evaluate the MOST RECENT candle only.
+
+    BUY:
+      EMA25 > EMA50 > EMA100
+      + recent price was above EMA50
+      + current candle pulls back into EMA50 zone
+      + current candle is bullish rejection
+      + current candle closes above EMA50
+
+    SELL:
+      EMA100 > EMA50 > EMA25
+      + recent price was below EMA50
+      + current candle pulls back into EMA50 zone
+      + current candle is bearish rejection
+      + current candle closes below EMA50
+    """
 
     n = len(df)
 
-
-    # ============================================================
-    # BULLISH STATE
-    # ============================================================
-
-    bull_state = "IDLE"
-
-    bull_impulse_start = None
-    bull_impulse_high = None
-    bull_pullback_low = None
-
-    bull_impulse_start_index = None
-    bull_impulse_high_index = None
-    bull_pullback_start_index = None
-
-    bull_pullback_count = 0
-
-
-    # ============================================================
-    # BEARISH STATE
-    # ============================================================
-
-    bear_state = "IDLE"
-
-    bear_impulse_start = None
-    bear_impulse_low = None
-    bear_pullback_high = None
-
-    bear_impulse_start_index = None
-    bear_impulse_low_index = None
-    bear_pullback_start_index = None
-
-    bear_pullback_count = 0
-
-
-    # ============================================================
-    # FINAL SIGNAL
-    # ============================================================
-
     signal = None
-
     key_level = None
-
     pullback_extreme = None
-
-    entry_status = "NOT_READY"
-
     setup_type = "NO_SETUP"
-
+    entry_status = "NOT_READY"
     analysis = {}
 
-
-    # ============================================================
-    # PROCESS CANDLES
-    # ============================================================
-
-    for i in range(
-        EMA_SLOPE_LOOKBACK,
-        n
-    ):
-
-        row = df.iloc[i]
-
-        close = float(row["close"])
-        high = float(row["high"])
-        low = float(row["low"])
-
-        ema = float(row["ema50"])
-        atr = float(row["atr"])
-
-
-        if (
-            pd.isna(ema)
-            or pd.isna(atr)
-            or atr <= 0
-        ):
-
-            continue
-
-
-        trend = get_trend(
-            df,
-            i
+    if n < 4:
+        return (
+            signal,
+            key_level,
+            pullback_extreme,
+            setup_type,
+            analysis,
+            {"entry_status": entry_status}
         )
 
-
-        # ========================================================
-        # BULLISH ENVIRONMENT
-        # ========================================================
-
-        if trend == "BULL":
-
-            # ----------------------------------------------------
-            # Cancel bearish setup
-            # ----------------------------------------------------
-
-            bear_state = "IDLE"
-
-            bear_impulse_start = None
-            bear_impulse_low = None
-            bear_pullback_high = None
-
-            bear_pullback_count = 0
-
-
-            # ----------------------------------------------------
-            # START BULLISH IMPULSE
-            # ----------------------------------------------------
-
-            if bull_state == "IDLE":
-
-                bull_state = "IMPULSE"
-
-                bull_impulse_start = low
-
-                bull_impulse_high = high
-
-                bull_impulse_start_index = i
-
-                bull_impulse_high_index = i
-
-                bull_pullback_low = None
-
-                bull_pullback_count = 0
-
-
-                entry_status = (
-                    "WAITING_FOR_IMPULSE"
-                )
-
-                setup_type = (
-                    "BULLISH_TREND"
-                )
-
-
-            # ====================================================
-            # TRACK BULLISH IMPULSE
-            # ====================================================
-
-            if bull_state == "IMPULSE":
-
-                # -----------------------------------------------
-                # New high = impulse continues
-                # -----------------------------------------------
-
-                if high >= bull_impulse_high:
-
-                    bull_impulse_high = high
-
-                    bull_impulse_high_index = i
-
-                    bull_pullback_count = 0
-
-                    bull_pullback_low = None
-
-
-                # -----------------------------------------------
-                # Red candle = possible pullback
-                # -----------------------------------------------
-
-                elif is_red(row):
-
-                    bull_pullback_count += 1
-
-                    if bull_pullback_low is None:
-
-                        bull_pullback_low = low
-
-                        bull_pullback_start_index = i
-
-                    else:
-
-                        bull_pullback_low = min(
-                            bull_pullback_low,
-                            low
-                        )
-
-
-                    # -------------------------------------------
-                    # Check impulse size
-                    # -------------------------------------------
-
-                    impulse_size = (
-                        bull_impulse_high
-                        - bull_impulse_start
-                    )
-
-
-                    impulse_is_large_enough = (
-                        impulse_size
-                        >= atr * MIN_IMPULSE_ATR
-                    )
-
-
-                    if (
-                        bull_pullback_count
-                        >= MIN_PULLBACK_CANDLES
-                        and impulse_is_large_enough
-                    ):
-
-                        bull_state = "PULLBACK"
-
-                        entry_status = (
-                            "PULLBACK_DETECTED"
-                        )
-
-                        setup_type = (
-                            "BULLISH_PULLBACK"
-                        )
-
-
-                else:
-
-                    # Green candle during impulse
-                    # means momentum continues.
-
-                    bull_pullback_count = 0
-
-                    bull_pullback_low = None
-
-
-            # ====================================================
-            # BULLISH PULLBACK
-            # ====================================================
-
-            if bull_state == "PULLBACK":
-
-                # ------------------------------------------------
-                # Track REAL pullback low
-                # ------------------------------------------------
-
-                bull_pullback_low = min(
-                    bull_pullback_low,
-                    low
-                )
-
-
-                bull_pullback_count += 1
-
-
-                # ------------------------------------------------
-                # Calculate retracement
-                # ------------------------------------------------
-
-                retracement = (
-                    calculate_pullback_measurement(
-                        bull_impulse_start,
-                        bull_impulse_high,
-                        bull_pullback_low,
-                        "BULL"
-                    )
-                )
-
-
-                if retracement is None:
-
-                    continue
-
-
-                # ------------------------------------------------
-                # Distance to EMA50
-                # ------------------------------------------------
-
-                ema_distance = abs(
-                    bull_pullback_low
-                    - ema
-                )
-
-
-                ema_distance_atr = (
-                    ema_distance / atr
-                )
-
-
-                near_ema = is_near_ema(
-                    bull_pullback_low,
-                    ema,
-                    atr
-                )
-
-
-                # ------------------------------------------------
-                # Pullback too deep
-                # ------------------------------------------------
-
-                if (
-                    retracement
-                    > MAX_PULLBACK_RETRACE
-                ):
-
-                    bull_state = "IDLE"
-
-                    bull_pullback_count = 0
-
-                    continue
-
-
-                # ------------------------------------------------
-                # Structure invalidation
-                #
-                # Pullback cannot break the original
-                # impulse starting point.
-                # ------------------------------------------------
-
-                if (
-                    bull_pullback_low
-                    <= bull_impulse_start
-                ):
-
-                    bull_state = "IDLE"
-
-                    bull_pullback_count = 0
-
-                    continue
-
-
-                # ------------------------------------------------
-                # Need EMA interaction
-                # ------------------------------------------------
-
-                if near_ema:
-
-                    entry_status = (
-                        "WAITING_FOR_CONFIRMATION"
-                    )
-
-                    setup_type = (
-                        "BULLISH_PULLBACK_AT_EMA50"
-                    )
-
-
-                # ------------------------------------------------
-                # Confirmation
-                #
-                # We require:
-                #
-                # 1. Pullback has reached EMA zone
-                # 2. Current candle is bullish
-                # 3. Close is above EMA
-                # 4. Pullback is within acceptable depth
-                # ------------------------------------------------
-
-                confirmation = (
-                    near_ema
-                    and bullish_confirmation(row)
-                    and close > ema
-                    and retracement >= MIN_PULLBACK_RETRACE
-                )
-
-
-                if confirmation:
-
-                    signal = "BUY"
-
-                    key_level = ema
-
-                    pullback_extreme = (
-                        bull_pullback_low
-                    )
-
-                    entry_status = "READY"
-
-                    setup_type = (
-                        "EMA50_PULLBACK_BUY"
-                    )
-
-
-                    analysis = {
-
-                        "trend": "BULL",
-
-                        "impulse_start":
-                            round(
-                                bull_impulse_start,
-                                5
-                            ),
-
-                        "impulse_high":
-                            round(
-                                bull_impulse_high,
-                                5
-                            ),
-
-                        "pullback_low":
-                            round(
-                                bull_pullback_low,
-                                5
-                            ),
-
-                        "pullback_candles":
-                            bull_pullback_count,
-
-                        "pullback_retracement":
-                            round(
-                                retracement * 100,
-                                2
-                            ),
-
-                        "ema_distance_atr":
-                            round(
-                                ema_distance_atr,
-                                3
-                            ),
-
-                        "ema50_touched":
-                            True,
-
-                        "confirmation":
-                            "BULLISH_REJECTION",
-
-                    }
-
-
-                    # -------------------------------------------
-                    # Reset
-                    # -------------------------------------------
-
-                    bull_state = "IDLE"
-
-                    bull_pullback_count = 0
-
-
-                else:
-
-                    # Still waiting
-
-                    if near_ema:
-
-                        entry_status = (
-                            "WAITING_FOR_CONFIRMATION"
-                        )
-
-
-                    else:
-
-                        entry_status = (
-                            "WAITING_FOR_EMA_PULLBACK"
-                        )
-
-
-        # ========================================================
-        # BEARISH ENVIRONMENT
-        # ========================================================
-
-        elif trend == "BEAR":
-
-            # ----------------------------------------------------
-            # Cancel bullish setup
-            # ----------------------------------------------------
-
-            bull_state = "IDLE"
-
-            bull_impulse_start = None
-            bull_impulse_high = None
-            bull_pullback_low = None
-
-            bull_pullback_count = 0
-
-
-            # ----------------------------------------------------
-            # Start bearish impulse
-            # ----------------------------------------------------
-
-            if bear_state == "IDLE":
-
-                bear_state = "IMPULSE"
-
-                bear_impulse_start = high
-
-                bear_impulse_low = low
-
-                bear_impulse_start_index = i
-
-                bear_impulse_low_index = i
-
-                bear_pullback_high = None
-
-                bear_pullback_count = 0
-
-
-                entry_status = (
-                    "WAITING_FOR_IMPULSE"
-                )
-
-                setup_type = (
-                    "BEARISH_TREND"
-                )
-
-
-            # ====================================================
-            # TRACK BEARISH IMPULSE
-            # ====================================================
-
-            if bear_state == "IMPULSE":
-
-                # -----------------------------------------------
-                # New low = impulse continues
-                # -----------------------------------------------
-
-                if low <= bear_impulse_low:
-
-                    bear_impulse_low = low
-
-                    bear_impulse_low_index = i
-
-                    bear_pullback_count = 0
-
-                    bear_pullback_high = None
-
-
-                # -----------------------------------------------
-                # Green candle = possible pullback
-                # -----------------------------------------------
-
-                elif is_green(row):
-
-                    bear_pullback_count += 1
-
-                    if bear_pullback_high is None:
-
-                        bear_pullback_high = high
-
-                        bear_pullback_start_index = i
-
-                    else:
-
-                        bear_pullback_high = max(
-                            bear_pullback_high,
-                            high
-                        )
-
-
-                    impulse_size = (
-                        bear_impulse_start
-                        - bear_impulse_low
-                    )
-
-
-                    impulse_is_large_enough = (
-                        impulse_size
-                        >= atr * MIN_IMPULSE_ATR
-                    )
-
-
-                    if (
-                        bear_pullback_count
-                        >= MIN_PULLBACK_CANDLES
-                        and impulse_is_large_enough
-                    ):
-
-                        bear_state = "PULLBACK"
-
-                        entry_status = (
-                            "PULLBACK_DETECTED"
-                        )
-
-                        setup_type = (
-                            "BEARISH_PULLBACK"
-                        )
-
-
-                else:
-
-                    bear_pullback_count = 0
-
-                    bear_pullback_high = None
-
-
-            # ====================================================
-            # BEARISH PULLBACK
-            # ====================================================
-
-            if bear_state == "PULLBACK":
-
-                # ------------------------------------------------
-                # Track REAL pullback high
-                # ------------------------------------------------
-
-                bear_pullback_high = max(
-                    bear_pullback_high,
-                    high
-                )
-
-
-                bear_pullback_count += 1
-
-
-                # ------------------------------------------------
-                # Calculate retracement
-                # ------------------------------------------------
-
-                retracement = (
-                    calculate_pullback_measurement(
-                        bear_impulse_start,
-                        bear_impulse_low,
-                        bear_pullback_high,
-                        "BEAR"
-                    )
-                )
-
-
-                if retracement is None:
-
-                    continue
-
-
-                # ------------------------------------------------
-                # EMA distance
-                # ------------------------------------------------
-
-                ema_distance = abs(
-                    bear_pullback_high
-                    - ema
-                )
-
-
-                ema_distance_atr = (
-                    ema_distance / atr
-                )
-
-
-                near_ema = is_near_ema(
-                    bear_pullback_high,
-                    ema,
-                    atr
-                )
-
-
-                # ------------------------------------------------
-                # Pullback too deep
-                # ------------------------------------------------
-
-                if (
-                    retracement
-                    > MAX_PULLBACK_RETRACE
-                ):
-
-                    bear_state = "IDLE"
-
-                    bear_pullback_count = 0
-
-                    continue
-
-
-                # ------------------------------------------------
-                # Structure invalidation
-                # ------------------------------------------------
-
-                if (
-                    bear_pullback_high
-                    >= bear_impulse_start
-                ):
-
-                    bear_state = "IDLE"
-
-                    bear_pullback_count = 0
-
-                    continue
-
-
-                # ------------------------------------------------
-                # EMA reached
-                # ------------------------------------------------
-
-                if near_ema:
-
-                    entry_status = (
-                        "WAITING_FOR_CONFIRMATION"
-                    )
-
-                    setup_type = (
-                        "BEARISH_PULLBACK_AT_EMA50"
-                    )
-
-
-                # ------------------------------------------------
-                # Confirmation
-                # ------------------------------------------------
-
-                confirmation = (
-                    near_ema
-                    and bearish_confirmation(row)
-                    and close < ema
-                    and retracement >= MIN_PULLBACK_RETRACE
-                )
-
-
-                if confirmation:
-
-                    signal = "SELL"
-
-                    key_level = ema
-
-                    pullback_extreme = (
-                        bear_pullback_high
-                    )
-
-                    entry_status = "READY"
-
-                    setup_type = (
-                        "EMA50_PULLBACK_SELL"
-                    )
-
-
-                    analysis = {
-
-                        "trend": "BEAR",
-
-                        "impulse_start":
-                            round(
-                                bear_impulse_start,
-                                5
-                            ),
-
-                        "impulse_low":
-                            round(
-                                bear_impulse_low,
-                                5
-                            ),
-
-                        "pullback_high":
-                            round(
-                                bear_pullback_high,
-                                5
-                            ),
-
-                        "pullback_candles":
-                            bear_pullback_count,
-
-                        "pullback_retracement":
-                            round(
-                                retracement * 100,
-                                2
-                            ),
-
-                        "ema_distance_atr":
-                            round(
-                                ema_distance_atr,
-                                3
-                            ),
-
-                        "ema50_touched":
-                            True,
-
-                        "confirmation":
-                            "BEARISH_REJECTION",
-
-                    }
-
-
-                    bear_state = "IDLE"
-
-                    bear_pullback_count = 0
-
-
-                else:
-
-                    if near_ema:
-
-                        entry_status = (
-                            "WAITING_FOR_CONFIRMATION"
-                        )
-
-                    else:
-
-                        entry_status = (
-                            "WAITING_FOR_EMA_PULLBACK"
-                        )
-
-
-        # ========================================================
-        # NEUTRAL
-        # ========================================================
-
-        else:
-
-            # Don't immediately destroy everything.
-            # A temporary neutral candle is allowed.
-
-            if bull_state == "PULLBACK":
-
-                entry_status = (
-                    "PULLBACK_ACTIVE"
-                )
-
-            elif bear_state == "PULLBACK":
-
-                entry_status = (
-                    "PULLBACK_ACTIVE"
-                )
-
+    i = n - 1
+    row = df.iloc[i]
+
+    ema25 = float(row["ema25"])
+    ema50 = float(row["ema50"])
+    ema100 = float(row["ema100"])
+    atr = float(row["atr"])
+
+    trend = get_trend(df, i)
+
+    if any(pd.isna(x) for x in [ema25, ema50, ema100, atr]) or atr <= 0:
+        return (
+            signal,
+            key_level,
+            pullback_extreme,
+            setup_type,
+            analysis,
+            {"entry_status": "NOT_READY"}
+        )
+
+    # Look back a few candles to confirm price was on the
+    # correct side of EMA50 before the pullback.
+    lookback_start = max(0, i - 3)
+    recent = df.iloc[lookback_start:i]
+
+    had_price_above_ema50 = any(
+        float(r["close"]) > float(r["ema50"])
+        for _, r in recent.iterrows()
+    )
+
+    had_price_below_ema50 = any(
+        float(r["close"]) < float(r["ema50"])
+        for _, r in recent.iterrows()
+    )
+
+    touched_ema50 = candle_touches_ema50(
+        row,
+        ema50,
+        atr
+    )
 
     # ============================================================
-    # STATUS OBJECT
+    # BUY
     # ============================================================
+
+    if trend == "BULL":
+
+        setup_type = "BULLISH_TREND"
+
+        if had_price_above_ema50 and touched_ema50:
+            setup_type = "BULLISH_PULLBACK_AT_EMA50"
+            entry_status = "WAITING_FOR_CONFIRMATION"
+
+        confirmation = (
+            had_price_above_ema50
+            and touched_ema50
+            and bullish_rejection(row)
+            and float(row["close"]) > ema50
+        )
+
+        if confirmation:
+
+            signal = "BUY"
+            key_level = ema50
+            pullback_extreme = float(row["low"])
+            entry_status = "READY"
+            setup_type = "EMA50_PULLBACK_BUY"
+
+            analysis = {
+                "trend": "BULL",
+                "ema25": round(ema25, 5),
+                "ema50": round(ema50, 5),
+                "ema100": round(ema100, 5),
+                "ema_alignment": "EMA25 > EMA50 > EMA100",
+                "price_pulled_back_to_ema50": True,
+                "ema50_touched": True,
+                "confirmation": "BULLISH_REJECTION",
+                "entry_candle_low": round(float(row["low"]), 5),
+                "entry_candle_high": round(float(row["high"]), 5),
+                "entry_candle_close": round(float(row["close"]), 5),
+            }
+
+    # ============================================================
+    # SELL
+    # ============================================================
+
+    elif trend == "BEAR":
+
+        setup_type = "BEARISH_TREND"
+
+        if had_price_below_ema50 and touched_ema50:
+            setup_type = "BEARISH_PULLBACK_AT_EMA50"
+            entry_status = "WAITING_FOR_CONFIRMATION"
+
+        confirmation = (
+            had_price_below_ema50
+            and touched_ema50
+            and bearish_rejection(row)
+            and float(row["close"]) < ema50
+        )
+
+        if confirmation:
+
+            signal = "SELL"
+            key_level = ema50
+            pullback_extreme = float(row["high"])
+            entry_status = "READY"
+            setup_type = "EMA50_PULLBACK_SELL"
+
+            analysis = {
+                "trend": "BEAR",
+                "ema25": round(ema25, 5),
+                "ema50": round(ema50, 5),
+                "ema100": round(ema100, 5),
+                "ema_alignment": "EMA100 > EMA50 > EMA25",
+                "price_pulled_back_to_ema50": True,
+                "ema50_touched": True,
+                "confirmation": "BEARISH_REJECTION",
+                "entry_candle_low": round(float(row["low"]), 5),
+                "entry_candle_high": round(float(row["high"]), 5),
+                "entry_candle_close": round(float(row["close"]), 5),
+            }
+
+    else:
+        setup_type = "NO_SETUP"
+        entry_status = "NOT_READY"
 
     status = {
-
-        "bull_phase":
-            bull_state,
-
-        "bull_impulse_start":
-            round(
-                bull_impulse_start,
-                5
-            )
-            if bull_impulse_start is not None
-            else None,
-
-        "bull_impulse_high":
-            round(
-                bull_impulse_high,
-                5
-            )
-            if bull_impulse_high is not None
-            else None,
-
-        "bull_pullback_low":
-            round(
-                bull_pullback_low,
-                5
-            )
-            if bull_pullback_low is not None
-            else None,
-
-        "bull_pullback_candles":
-            bull_pullback_count,
-
-
-        "bear_phase":
-            bear_state,
-
-        "bear_impulse_start":
-            round(
-                bear_impulse_start,
-                5
-            )
-            if bear_impulse_start is not None
-            else None,
-
-        "bear_impulse_low":
-            round(
-                bear_impulse_low,
-                5
-            )
-            if bear_impulse_low is not None
-            else None,
-
-        "bear_pullback_high":
-            round(
-                bear_pullback_high,
-                5
-            )
-            if bear_pullback_high is not None
-            else None,
-
-        "bear_pullback_candles":
-            bear_pullback_count,
-
-
-        "entry_status":
-            entry_status,
-
+        "entry_status": entry_status,
+        "latest_trend": trend,
     }
-
 
     return (
         signal,
@@ -1241,14 +370,7 @@ def run_pullback_strategy(df):
 @app.post("/analyze")
 def analyze(data: MarketData):
 
-    df = pd.DataFrame(
-        data.values
-    )
-
-
-    # ============================================================
-    # VALIDATE
-    # ============================================================
+    df = pd.DataFrame(data.values)
 
     required_columns = [
         "open",
@@ -1257,66 +379,55 @@ def analyze(data: MarketData):
         "close"
     ]
 
-
-    if not all(
-        col in df.columns
-        for col in required_columns
-    ):
-
+    if not all(col in df.columns for col in required_columns):
         return {
             "error": "Missing OHLC data"
         }
 
-
-    if len(df) < 100:
-
+    if len(df) < EMA_SLOW:
         return {
-            "error": (
-                "Not enough data. "
-                "Need at least 100 candles."
-            )
+            "error": f"Not enough data. Need at least {EMA_SLOW} candles."
         }
 
-
-    # ============================================================
-    # NEWEST FIRST → OLDEST FIRST
-    # ============================================================
-
+    # Incoming data is assumed to be newest first.
+    # Convert to oldest -> newest for EMA/strategy calculations.
     df = (
         df.iloc[::-1]
         .reset_index(drop=True)
     )
 
-
-    # ============================================================
-    # CONVERT OHLC
-    # ============================================================
-
     for col in required_columns:
-
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
         )
 
-
-    df = df.dropna(
-        subset=required_columns
-    ).reset_index(drop=True)
-
+    df = (
+        df.dropna(subset=required_columns)
+        .reset_index(drop=True)
+    )
 
     # ============================================================
-    # EMA50
+    # EMAs
     # ============================================================
+
+    df["ema25"] = EMAIndicator(
+        close=df["close"],
+        window=EMA_FAST
+    ).ema_indicator()
 
     df["ema50"] = EMAIndicator(
         close=df["close"],
-        window=EMA_PERIOD
+        window=EMA_MID
     ).ema_indicator()
 
+    df["ema100"] = EMAIndicator(
+        close=df["close"],
+        window=EMA_SLOW
+    ).ema_indicator()
 
     # ============================================================
-    # ATR14
+    # ATR
     # ============================================================
 
     atr_indicator = AverageTrueRange(
@@ -1326,34 +437,24 @@ def analyze(data: MarketData):
         window=ATR_PERIOD
     )
 
+    df["atr"] = atr_indicator.average_true_range()
 
-    df["atr"] = (
-        atr_indicator
-        .average_true_range()
+    df = (
+        df.dropna(
+            subset=[
+                "ema25",
+                "ema50",
+                "ema100",
+                "atr"
+            ]
+        )
+        .reset_index(drop=True)
     )
 
-
-    # ============================================================
-    # REMOVE WARMUP
-    # ============================================================
-
-    df = df.dropna(
-        subset=[
-            "ema50",
-            "atr"
-        ]
-    ).reset_index(drop=True)
-
-
-    if len(df) < 20:
-
+    if len(df) < 2:
         return {
-            "error": (
-                "Not enough data after "
-                "indicator warm-up."
-            )
+            "error": "Not enough data after indicator warm-up."
         }
-
 
     # ============================================================
     # RUN STRATEGY
@@ -1366,96 +467,66 @@ def analyze(data: MarketData):
         setup_type,
         analysis,
         status
-    ) = run_pullback_strategy(df)
-
+    ) = run_ema_pullback_strategy(df)
 
     latest = df.iloc[-1]
 
+    entry_price = float(latest["close"])
+    ema25 = float(latest["ema25"])
+    ema50 = float(latest["ema50"])
+    ema100 = float(latest["ema100"])
+    atr = float(latest["atr"])
 
-    entry_price = float(
-        latest["close"]
-    )
-
-    ema50 = float(
-        latest["ema50"]
-    )
-
-    atr = float(
-        latest["atr"]
-    )
-
-
-    # ============================================================
-    # DEFAULT RESPONSE
-    # ============================================================
+    latest_trend = get_trend(df, len(df) - 1)
 
     response = {
+        "symbol": data.symbol,
+        "timeframe": data.timeframe,
 
-        "symbol":
-            data.symbol,
+        "entry_price": round(entry_price, 5),
 
-        "timeframe":
-            data.timeframe,
+        "ema25": round(ema25, 5),
+        "ema50": round(ema50, 5),
+        "ema100": round(ema100, 5),
 
-        "entry_price":
-            round(
-                entry_price,
-                5
-            ),
+        "ema_alignment": (
+            "EMA25 > EMA50 > EMA100"
+            if latest_trend == "BULL"
+            else
+            "EMA100 > EMA50 > EMA25"
+            if latest_trend == "BEAR"
+            else
+            "NONE"
+        ),
 
-        "ema50":
-            round(
-                ema50,
-                5
-            ),
+        "atr": round(atr, 5),
 
-        "atr":
-            round(
-                atr,
-                5
-            ),
+        "signal": "NEUTRAL",
 
-        "signal":
-            "NEUTRAL",
+        "entry_status": status["entry_status"],
 
-        "entry_status":
-            status["entry_status"],
+        "setup_type": setup_type,
 
-        "setup_type":
-            setup_type,
-
-        "key_level":
-            round(
-                float(key_level),
-                5
-            )
+        "key_level": (
+            round(float(key_level), 5)
             if key_level is not None
-            else None,
+            else None
+        ),
 
-        "pullback_extreme":
-            round(
-                float(pullback_extreme),
-                5
-            )
+        "pullback_extreme": (
+            round(float(pullback_extreme), 5)
             if pullback_extreme is not None
-            else None,
+            else None
+        ),
 
-        "stop_loss":
-            None,
+        "stop_loss": None,
+        "take_profit": None,
+        "risk_reward": None,
 
-        "take_profit":
-            None,
+        "pullback_analysis": analysis,
 
-        "risk_reward":
-            None,
-
-        "pullback_analysis":
-            analysis,
-
-        "status":
-            status,
+        "status": status
     }
-
 
     # ============================================================
     # BUY
@@ -1468,62 +539,40 @@ def analyze(data: MarketData):
 
         stop_loss = (
             pullback_extreme
-            - (
-                atr
-                * SL_ATR_BUFFER
-            )
+            - (atr * SL_ATR_BUFFER)
         )
 
-
-        risk = (
-            entry_price
-            - stop_loss
-        )
-
+        risk = entry_price - stop_loss
 
         if risk > 0:
 
             take_profit = (
                 entry_price
-                + (
-                    risk
-                    * RISK_REWARD
-                )
+                + (risk * RISK_REWARD)
             )
 
-
             response.update({
+                "signal": "BUY",
+                "entry_status": "READY",
 
-                "signal":
-                    "BUY",
+                "stop_loss": round(
+                    stop_loss,
+                    5
+                ),
 
-                "entry_status":
-                    "READY",
+                "take_profit": round(
+                    take_profit,
+                    5
+                ),
 
-                "stop_loss":
-                    round(
-                        stop_loss,
-                        5
-                    ),
+                "risk_reward": f"1:{RISK_REWARD:g}",
 
-                "take_profit":
-                    round(
-                        take_profit,
-                        5
-                    ),
-
-                "risk_reward":
-                    f"1:{RISK_REWARD:g}",
-
-                "info":
-                    (
-                        "Bullish trend + impulse + "
-                        "healthy pullback + EMA50 "
-                        "interaction + bullish "
-                        "confirmation."
-                    ),
+                "info": (
+                    "EMA25 > EMA50 > EMA100 + "
+                    "price pulled back to EMA50 + "
+                    "bullish rejection candle."
+                )
             })
-
 
     # ============================================================
     # SELL
@@ -1536,62 +585,40 @@ def analyze(data: MarketData):
 
         stop_loss = (
             pullback_extreme
-            + (
-                atr
-                * SL_ATR_BUFFER
-            )
+            + (atr * SL_ATR_BUFFER)
         )
 
-
-        risk = (
-            stop_loss
-            - entry_price
-        )
-
+        risk = stop_loss - entry_price
 
         if risk > 0:
 
             take_profit = (
                 entry_price
-                - (
-                    risk
-                    * RISK_REWARD
-                )
+                - (risk * RISK_REWARD)
             )
 
-
             response.update({
+                "signal": "SELL",
+                "entry_status": "READY",
 
-                "signal":
-                    "SELL",
+                "stop_loss": round(
+                    stop_loss,
+                    5
+                ),
 
-                "entry_status":
-                    "READY",
+                "take_profit": round(
+                    take_profit,
+                    5
+                ),
 
-                "stop_loss":
-                    round(
-                        stop_loss,
-                        5
-                    ),
+                "risk_reward": f"1:{RISK_REWARD:g}",
 
-                "take_profit":
-                    round(
-                        take_profit,
-                        5
-                    ),
-
-                "risk_reward":
-                    f"1:{RISK_REWARD:g}",
-
-                "info":
-                    (
-                        "Bearish trend + impulse + "
-                        "healthy pullback + EMA50 "
-                        "interaction + bearish "
-                        "confirmation."
-                    ),
+                "info": (
+                    "EMA100 > EMA50 > EMA25 + "
+                    "price pulled back to EMA50 + "
+                    "bearish rejection candle."
+                )
             })
-
 
     # ============================================================
     # WAITING STATES
@@ -1599,75 +626,43 @@ def analyze(data: MarketData):
 
     else:
 
-        if setup_type == "BULLISH_PULLBACK":
+        if setup_type == "BULLISH_PULLBACK_AT_EMA50":
 
             response["info"] = (
-                "Bullish impulse detected. "
-                "Price is pulling back. "
-                "Measure the retracement and "
-                "wait for EMA50 interaction."
+                "Bullish EMA alignment detected and "
+                "price reached the EMA50 zone. "
+                "Wait for a bullish rejection candle."
             )
 
-
-        elif (
-            setup_type
-            == "BULLISH_PULLBACK_AT_EMA50"
-        ):
+        elif setup_type == "BEARISH_PULLBACK_AT_EMA50":
 
             response["info"] = (
-                "Bullish pullback reached the "
-                "EMA50 measurement zone. "
-                "Wait for bullish confirmation."
+                "Bearish EMA alignment detected and "
+                "price reached the EMA50 zone. "
+                "Wait for a bearish rejection candle."
             )
 
-
-        elif setup_type == "BEARISH_PULLBACK":
+        elif latest_trend == "BULL":
 
             response["info"] = (
-                "Bearish impulse detected. "
-                "Price is pulling back. "
-                "Measure the retracement and "
-                "wait for EMA50 interaction."
+                "Bullish EMA alignment: "
+                "EMA25 > EMA50 > EMA100. "
+                "Wait for price to pull back to EMA50."
             )
 
-
-        elif (
-            setup_type
-            == "BEARISH_PULLBACK_AT_EMA50"
-        ):
+        elif latest_trend == "BEAR":
 
             response["info"] = (
-                "Bearish pullback reached the "
-                "EMA50 measurement zone. "
-                "Wait for bearish confirmation."
+                "Bearish EMA alignment: "
+                "EMA100 > EMA50 > EMA25. "
+                "Wait for price to pull back to EMA50."
             )
-
-
-        elif setup_type == "BULLISH_TREND":
-
-            response["info"] = (
-                "Bullish trend detected. "
-                "Waiting for a meaningful "
-                "impulse and pullback."
-            )
-
-
-        elif setup_type == "BEARISH_TREND":
-
-            response["info"] = (
-                "Bearish trend detected. "
-                "Waiting for a meaningful "
-                "impulse and pullback."
-            )
-
 
         else:
 
             response["info"] = (
-                "No valid pullback entry "
-                "on the latest candle."
+                "No valid 25/50/100 EMA alignment."
             )
-
 
     return response
 
@@ -1680,24 +675,23 @@ def analyze(data: MarketData):
 def home():
 
     return {
+        "message": (
+            "25/50/100 EMA Pullback Strategy API "
+            "running successfully"
+        ),
 
-        "message":
-            "50 EMA Pullback Analysis Strategy API "
-            "running successfully",
+        "strategy": (
+            "EMA alignment -> EMA50 pullback -> "
+            "rejection candle -> entry"
+        ),
 
-        "strategy":
-            (
-                "Trend → Impulse → Pullback → "
-                "EMA50 Measurement → Confirmation"
-            ),
+        "ema_periods": [
+            EMA_FAST,
+            EMA_MID,
+            EMA_SLOW
+        ],
 
-        "ema_period":
-            EMA_PERIOD,
+        "atr_period": ATR_PERIOD,
 
-        "atr_period":
-            ATR_PERIOD,
-
-        "supported_timeframes":
-            "All candle timeframes"
-
+        "supported_timeframes": "All candle timeframes"
     }
